@@ -1,0 +1,213 @@
+USE [msdb]
+GO
+
+/****** Object:  Job [Read From MSSolve]    Script Date: 5/12/2017 12:11:09 AM ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]    Script Date: 5/12/2017 12:11:09 AM ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Read From MSSolve', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'runs every 15 seconds.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'PARTNERS\critsita', 
+		@notify_email_operator_name=N'CloudCRM Support Desk', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [pull from MSSolve]    Script Date: 5/12/2017 12:11:10 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'pull from MSSolve', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'SET NOCOUNT ON
+DECLARE @MAXMSSolveNGIMMessageId INT
+SELECT @MAXMSSolveNGIMMessageId = ISNULL(MAX(MSSolveNGIMMessageId),0) FROM [Critsit].dbo.ngimmessages
+
+INSERT INTO [Critsit].dbo.ngimmessages
+(
+	MSSolveNGIMMessageId,
+	createdon,
+	adcemail,
+	backuptam,
+	businessrule,
+	callcode,
+	casefirstname,
+	caselastname,
+	casephonenumber,
+	casepriority,
+	caseproduct,
+	caseresponselevel,
+	caseseverity,
+	casestatus,
+	casetitle,
+	ccproductid,
+	clarifysystem,
+	contactfirstname,
+	contactlastname,
+	contactphonenumber,
+	contractadmin,
+	contractcountry,
+	contractid,
+	contractregion,
+	creationdatetime,
+	currentowner,
+	currentownerphone,
+	currentqueue,
+	currentwipbin,
+	engineermngr,
+	engineerrole,
+	lastmodified,
+	objectid,
+	productid,
+	rowid,
+	serviceid,
+	siteaddress1,
+	siteaddress2,
+	sitecity,
+	siteid,
+	sitename,
+	sitestate,
+	tamemail,
+	casephone1type,
+	casephone1label,
+	casephonenumber2,
+	casephone2type,
+	casephone2label,
+	casephonenumber3,
+	casephone3type,
+	casephone3label,
+	caseprimaryphone,
+	caseprimaryemail,
+	casesecondaryemail,
+	scheduleobjid,
+	scheduleid,
+	clarifysiteid,
+                alttamemail,
+                altbackuptamemail,
+	CAPSRNumber,
+	IsEscalatedFlag,
+	LineofBusiness,
+	SRWaitState,
+	IsCritSitFromCAP,
+	SeviceDeliveryEscalation 
+)
+SELECT
+	NGIMMessageId,
+	createdon,
+	adcemail,
+	backuptam,
+	businessrule,
+	callcode,
+	casefirstname,
+	caselastname,
+	casephonenumber,
+	casepriority,
+	caseproduct,
+	caseresponselevel,
+	caseseverity,
+	casestatus,
+	casetitle,
+	ccproductid,
+	clarifysystem,
+	contactfirstname,
+	contactlastname,
+	contactphonenumber,
+	contractadmin,
+	contractcountry,
+	contractid,
+	contractregion,
+	creationdatetime,
+	currentowner,
+	currentownerphone,
+	currentqueue,
+	currentwipbin,
+	engineermngr,
+	engineerrole,
+	lastmodified,
+	objectid,
+	productid,
+	rowid,
+	serviceid,
+	siteaddress1,
+	siteaddress2,
+	sitecity,
+	siteid,
+	sitename,    
+	sitestate,
+	tamemail,
+                casephone1type,
+	casephone1label,
+	casephonenumber2,
+	casephone2type,
+	casephone2label,
+	casephonenumber3,
+	casephone3type,
+	casephone3label,
+	caseprimaryphone,
+	caseprimaryemail,
+	casesecondaryemail,
+	scheduleobjid,
+	scheduleid,
+	clarifysiteid,
+                alternatetamemail,
+                alternatebackuptam,
+	CAPSRNumber,
+	IsEscalatedFlag,
+	LineofBusiness,
+	SRWaitState,
+	IsCritSitFromCAP,
+	substring(ServiceDeliveryEscalation,0,99) 
+                
+FROM     MSSolveSource.NGIMExtension.dbo.NGIMCritSitMessages
+WHERE    NGIMMessageId > @MAXMSSolveNGIMMessageId
+ORDER BY NGIMMessageId
+
+', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Each 15 seconds, daily', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=2, 
+		@freq_subday_interval=15, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20090326, 
+		@active_end_date=99991231, 
+		@active_start_time=0, 
+		@active_end_time=235959, 
+		@schedule_uid=N'293368dc-91fe-4818-bcce-c9a47ff58e9d'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+

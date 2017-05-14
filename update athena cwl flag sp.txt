@@ -1,0 +1,565 @@
+USE [CritSit]
+GO
+
+/****** Object:  StoredProcedure [dbo].[UpdateCWLAthenaFlag]    Script Date: 5/12/2017 12:15:56 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+-- =============================================
+-- Author:		Rajesh
+-- Create date: 09/02/2015
+-- Description: Passing data table through Custom tool and updating the Athena and CWL Flag
+-- -- This is the sample script to test the SP
+------ An instance of the Table parameter type is created
+
+-- and then filled with the set of values
+
+--
+
+--Insert Into @tblVarForDataImportingtest(SiteID, SiteName,MSTPID,ScheduleID,CWL,Athena) Values('160576','','815515','','no','');
+------Insert Into @tblVarForDataImportingtest(SiteID, SiteName,MSTPID,ScheduleID,CWL,Athena) Values('320692','CapitaLand Limited','','1342572158','','no');
+----Insert Into @tblVarForDataImportingtest(SiteID, SiteName,MSTPID,ScheduleID,CWL,Athena) Values('160576','Department of Internal Affairs','815515','1073742632','yes','no');
+----Insert Into @tblVarForDataImportingtest(SiteID, SiteName,MSTPID,ScheduleID,CWL,Athena) Values('320692','CapitaLand Limited','10853875','1073765957','yes','yes');
+--Declare @tblVarForDataImportingtest As DataImportTableType
+--Insert Into @tblVarForDataImportingtest(SiteID, SiteName,MSTPID,ScheduleID,CWL,Athena) Values('340752',NULL,'955050','1073760205','no','no');			
+--Exec UpdateCWLAthenaFlag @tblVarForDataImportingtest
+--drop procedure [dbo].[UpdateCWLAthenaFlag] 
+
+CREATE PROCEDURE [dbo].[UpdateCWLAthenaFlag] 
+ (
+  @tblVarForDataImporting As dbo.DataImportTableType READONLY
+ )
+AS
+BEGIN
+	-- SET NOCOUNT ON added to prevent extra result sets from
+	-- interfering with SELECT statements.
+	SET NOCOUNT ON;
+
+    CREATE TABLE #tblDataImport
+		(
+		ID INT Primary KEY IDENTITY(1,1),
+        SiteID [NVARCHAR] (160) NULL,
+		SiteName [NVARCHAR](320) NULL,
+		MSTPID [NVARCHAR] (160)  NULL, 
+		ScheduleID [NVARCHAR] (160)  NULL,
+		Country [NVARCHAR](320) NULL,
+		CWL [NVARCHAR](50) NULL,
+		Athena [NVARCHAR](50) NULL
+		)
+		CREATE TABLE #tblDataImportStatus 
+	   (  
+		Status INT,	
+		SiteID [NVARCHAR](160) NULL,
+		SiteName [NVARCHAR](320) NULL,
+		MSTPID [NVARCHAR](160)NULL, 
+		ScheduleID [NVARCHAR](160)  NULL,
+		Country [NVARCHAR](320) NULL,
+		CWL [NVARCHAR](50) NULL,
+		Athena [NVARCHAR](50) NULL,
+		Reason Varchar(500) 
+	   )
+
+	 
+	INSERT INTO #tblDataImport 
+	SELECT * FROM @tblVarForDataImporting where CWL IS NOT NULL  or Athena IS NOT NULL
+
+--Declare the variables to store the Corresponding IDs Value from the Lookup table 
+ 
+    DECLARE @UpdateFields NVARCHAR(MAX)
+	DECLARE @SQLQuery AS NVARCHAR(MAX)
+	DECLARE @ParameterDefinition AS NVARCHAR(MAX)
+	DECLARE @SiteID	[NVARCHAR] (160)
+	DECLARE @SiteName [NVARCHAR](320)
+	DECLARE @MSTPID	[NVARCHAR] (160)
+	DECLARE @ScheduleID	[NVARCHAR] (160)
+	DECLARE @Country [NVARCHAR] (320)
+	DECLARE @CWL	[NVARCHAR](50)
+	DECLARE @Athena [NVARCHAR](50)
+	DECLARE @AthenaFlag bit
+	DECLARE @CWLFlag bit
+
+	DECLARE @rwCount INT,@iIndex INT
+	SET @iIndex = 0
+	 
+	SELECT @rwCount = COUNT(*) FROM #tblDataImport
+	WHILE @iIndex < @rwCount
+	BEGIN --While Loop Start	
+	
+	 SET @iIndex=@iIndex+1
+	 --PRINT @iIndex
+	 SET @UpdateFields=''
+	 SET @ParameterDefinition=''
+	 SELECT  
+		 @SiteID=SiteID,
+		 @SiteName=SiteName,
+		 @MSTPID=MSTPID,
+		 @ScheduleID=ScheduleID,
+		 @Country=Country,
+		 @CWL=CWL,
+		 @Athena=Athena
+	 From #tblDataImport WHERE ID= @iIndex
+	-- PRINT @Athena + ', ' + @CWL
+
+	SELECT @AthenaFlag=(CASE  @Athena WHEN 'Yes' THEN 1 WHEN 'No' THEN 0 ELSE NULL END)
+	SELECT @CWLFlag=(CASE  @CWL WHEN 'Yes' THEN 1 WHEN 'No' THEN 0 ELSE NULL END)
+	 
+	 --PRINT '@MSTPID:' +@MSTPID+'@ScheduleID: '+@ScheduleID+'@SiteID:' +@SiteID
+
+	  SET @SQLQuery='UPDATE MSCRITSIT_MSCRM.dbo.contact SET'
+
+	  IF  @AthenaFlag IS NOT NULL AND @CWLFlag IS NOT NULL 
+	   BEGIN
+	     SET @SQLQuery=@SQLQuery+' new_Athena=@AthenaFlag,new_CWL=@CWLFlag'
+		 SET @UpdateFields='Athena,CWL Flags are updated Succesfully'
+	   END 
+	   IF  @AthenaFlag IS NOT NULL  AND @CWLFlag IS NULL
+	    BEGIN
+	     SET @SQLQuery=@SQLQuery+' new_Athena=@AthenaFlag'
+		 SET @UpdateFields=@UpdateFields+ 'Athena Flag is updated Succesfully'
+	   END 
+	  IF @CWLFlag IS NOT NULL AND @AthenaFlag IS NULL
+	   BEGIN
+	     SET @SQLQuery=@SQLQuery+' new_CWL=@CWLFlag'
+		 SET @UpdateFields=@UpdateFields+ 'CWL Flag is updated Succesfully'
+	   END 
+	   
+	   SET @SQLQuery=@SQLQuery+' FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK)'
+	  
+	   IF @MSTPID IS NOT NULL AND @MSTPID <>''
+	    BEGIN
+				IF @AthenaFlag IS NOT NULL AND @CWLFlag IS NOT NULL 
+				BEGIN
+					Update MSCRITSIT_MSCRM.dbo.Account SET new_Athena=@AthenaFlag,new_CWL=@CWLFlag WHERE New_MSSalesTPIDtext= @MSTPID
+				END 
+				IF @AthenaFlag IS NOT NULL AND @CWLFlag IS NULL
+				BEGIN
+					Update MSCRITSIT_MSCRM.dbo.Account SET new_Athena=@AthenaFlag WHERE New_MSSalesTPIDtext= @MSTPID
+				END 
+				IF @CWLFlag IS NOT NULL AND @AthenaFlag IS NULL
+				BEGIN
+					Update MSCRITSIT_MSCRM.dbo.Account SET new_CWL=@CWLFlag WHERE New_MSSalesTPIDtext= @MSTPID
+				END 
+		 SET @SQLQuery=@SQLQuery+' JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK) ON CRMContact.ParentCustomerId =CRMAccount.AccountId'
+		END
+
+		IF @ScheduleID IS NOT NULL AND @ScheduleID <>''
+		 BEGIN 
+		  SET @SQLQuery=@SQLQuery+' JOIN MSCRITSIT_MSCRM.dbo.New_Schedule  CRMSCH  (NOLOCK) ON CRMContact.ContactId =CRMSCH.new_customersitescheduleid'
+		 END
+	   
+	   SET @SQLQuery=@SQLQuery+' WHERE  CRMContact.StateCode=0'
+
+	  
+	   IF @SiteID IS NOT NULL AND @MSTPID IS NOT NULL AND @ScheduleID IS NOT NULL AND @Country IS NOT NULL 
+	    BEGIN
+		       IF EXISTS(SELECT  TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule  CRMSCH  (NOLOCK) ON  CRMContact.ContactId =CRMSCH.new_customersitescheduleid
+                     WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMSCH.New_scheduleno=@ScheduleID 
+					 AND CRMContact.new_countryregionidName=@Country)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+				 
+				 SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMSCH.New_scheduleno=@ScheduleID AND CRMContact.new_countryregionidName=@Country'
+
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@MSTPID	[NVARCHAR] (160) ,
+									@ScheduleID	[NVARCHAR] (160),
+									@Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+
+	
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition, @SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+				 END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID,SiteName,MSTPID and ScheduleID doesn''t exist'
+			     END
+			END
+        ELSE IF @SiteID IS NOT NULL AND @MSTPID IS NOT NULL AND @ScheduleID IS NOT NULL AND @Country IS NULL
+		BEGIN
+		 IF EXISTS(SELECT  TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule  CRMSCH  (NOLOCK) ON  CRMContact.ContactId =CRMSCH.new_customersitescheduleid
+                     WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMSCH.New_scheduleno=@ScheduleID 
+					 )
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+				 
+				 SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMSCH.New_scheduleno=@ScheduleID'
+
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@MSTPID	[NVARCHAR] (160) ,
+									@ScheduleID	[NVARCHAR] (160),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+
+	
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition, @SiteID,@SiteName,@MSTPID,@ScheduleID,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+				 END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID,SiteName,MSTPID and ScheduleID doesn''t exist'
+			     END
+		END
+		ELSE IF @SiteID IS NOT NULL AND @MSTPID IS NOT NULL AND @ScheduleID IS NUll AND @Country IS NOT NULL
+	       BEGIN
+		        IF EXISTS(SELECT  TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  
+                     WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID  AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMContact.new_countryregionidName=@Country)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+
+				    SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMContact.new_countryregionidName =@Country'
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@MSTPID	[NVARCHAR] (160),
+									@Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@MSTPID,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID,MSTPID and ScheduleID doesn''t exist in CRM'
+			     END
+		   END
+		ELSE IF @SiteID IS NOT NULL AND @MSTPID IS NOT NULL AND @ScheduleID IS NUll AND @Country IS NULL
+	       BEGIN
+		        IF EXISTS(SELECT  TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  
+                     WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID  AND CRMAccount.New_MSSalesTPIDtext=@MSTPID)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+
+				    SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID '
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@MSTPID	[NVARCHAR] (160),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@MSTPID,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID,MSTPID and ScheduleID doesn''t exist in CRM'
+			     END
+		   END
+		   ELSE IF @SiteID IS NOT NULL AND @ScheduleID IS NOT NULL AND @MSTPID IS NULL AND @Country IS NOT NULL
+	       BEGIN
+		        IF EXISTS(SELECT TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK)  
+				JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule CRMSCH (NOLOCK) ON  CRMContact.ContactId = CRMSCH.new_customersitescheduleid
+                WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID  AND CRMSCH.New_scheduleno=@ScheduleID AND CRMContact.new_countryregionidName=@Country)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL 
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+                 
+				 SET @SQLQuery=@SQLQuery+' AND CRMSCH.New_scheduleno=@ScheduleID AND CRMContact.new_countryregionidName=@Country'
+
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@ScheduleID	[NVARCHAR] (160) ,
+									@Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@ScheduleID,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+
+			     END
+
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID and ScheduleID doesn''t exist in CRM'
+			     END
+			END
+		   ELSE IF @SiteID IS NOT NULL AND @ScheduleID IS NOT NULL AND @MSTPID IS NULL AND @Country IS NULL
+	       BEGIN
+		        IF EXISTS(SELECT TOP(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK)  
+				JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule CRMSCH (NOLOCK) ON  CRMContact.ContactId = CRMSCH.new_customersitescheduleid
+                WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID  AND CRMSCH.New_scheduleno=@ScheduleID)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL 
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+                 
+				 SET @SQLQuery=@SQLQuery+' AND CRMSCH.New_scheduleno=@ScheduleID'
+
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@ScheduleID	[NVARCHAR] (160) ,
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@ScheduleID,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+
+			     END
+
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID and ScheduleID doesn''t exist in CRM'
+			     END
+			END
+            ELSE IF @SiteID IS NULL AND @MSTPID IS NOT NULL AND @Country IS NOT NULL  --AND @ScheduleID IS NUll
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  
+                     WHERE CRMContact.StateCode=0 AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMContact.new_countryregionidName =@Country)
+	       
+				BEGIN
+				    SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID AND CRMContact.new_countryregionidName=@Country '
+			 		SET @ParameterDefinition =  '@MSTPID	[NVARCHAR] (160) ,
+					                    @Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@MSTPID,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with MSTPID doesn''t exist in CRM'
+			     END
+		   END
+		   ELSE IF @SiteID IS NULL AND @MSTPID IS NOT NULL AND @Country IS NULL--AND @ScheduleID IS NUll
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) JOIN MSCRITSIT_MSCRM.dbo.Account CRMAccount (NOLOCK)  
+	                 ON CRMContact.ParentCustomerId =CRMAccount.AccountId  
+                     WHERE CRMContact.StateCode=0 AND CRMAccount.New_MSSalesTPIDtext=@MSTPID)
+	       
+				BEGIN
+				    SET @SQLQuery=@SQLQuery+' AND CRMAccount.New_MSSalesTPIDtext=@MSTPID '
+			 		SET @ParameterDefinition =  '@MSTPID	[NVARCHAR] (160) ,
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@MSTPID,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with MSTPID doesn''t exist in CRM'
+			     END
+		   END
+		   ELSE IF @SiteID IS NULL AND @ScheduleID IS NOT NULL AND @Country IS NOT NULL --AND @MSTPID IS NULL
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK)  
+				JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule CRMSCH (NOLOCK) ON  CRMContact.ContactId = CRMSCH.new_customersitescheduleid
+                WHERE CRMContact.StateCode=0 AND CRMSCH.New_scheduleno=@ScheduleID AND CRMContact.new_countryregionidName =@Country)
+				 BEGIN
+				 
+                	SET @SQLQuery=@SQLQuery+' AND CRMSCH.New_scheduleno=@ScheduleID AND CRMContact.new_countryregionidName =@Country '
+
+			 		SET @ParameterDefinition =  '@ScheduleID	[NVARCHAR] (160),
+					                @Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@ScheduleID,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+
+			     END
+
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with ScheduleID doesn''t exist in CRM'
+			     END
+			END
+			ELSE IF @SiteID IS NULL AND @ScheduleID IS NOT NULL AND @Country IS NULL --AND @MSTPID IS NULL
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK)  
+				JOIN  MSCRITSIT_MSCRM.dbo.New_Schedule CRMSCH (NOLOCK) ON  CRMContact.ContactId = CRMSCH.new_customersitescheduleid
+                WHERE CRMContact.StateCode=0 AND CRMSCH.New_scheduleno=@ScheduleID)
+				 BEGIN
+				 
+                	SET @SQLQuery=@SQLQuery+' AND CRMSCH.New_scheduleno=@ScheduleID'
+
+			 		SET @ParameterDefinition =  '@ScheduleID	[NVARCHAR] (160),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@ScheduleID,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+
+			     END
+
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with ScheduleID doesn''t exist in CRM'
+			     END
+			END
+			ELSE IF @SiteID IS NOT NULL AND @MSTPID IS NULL AND @ScheduleID IS NUll AND @Country IS NOT NULL
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) WHERE 
+				CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID AND CRMContact.new_countryregionidName =@Country)
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID AND CRMContact.new_countryregionidName=@Country'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID doesn''t exist in CRM'
+			     END
+				 END
+			ELSE IF @SiteID IS NOT NULL AND @MSTPID IS NULL AND @ScheduleID IS NUll AND @Country IS NULL
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.New_SiteID FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) WHERE CRMContact.StateCode=0 AND CRMContact.New_SiteID=@SiteID )
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.New_SiteID=@SiteID'
+				   IF @SiteName IS NOT NULL AND @SiteName <>''
+				    BEGIN
+				     SET @SQLQuery=@SQLQuery+'  AND ISNULL(CRMContact.New_SRSiteName ,CRMContact.New_SiteName)=@SiteName'
+				    END
+			 		SET @ParameterDefinition =  '@SiteID	[NVARCHAR] (160),
+									@SiteName [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@SiteID,@SiteName,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID doesn''t exist in CRM'
+			     END
+				 END
+
+				 ELSE IF @SiteID IS NULL AND @MSTPID IS NULL AND @ScheduleID IS NUll AND @Country IS NOT NULL
+	       BEGIN
+		        IF EXISTS(SELECT top(1) CRMContact.Address1_Country FROM MSCRITSIT_MSCRM.dbo.contact CRMContact (NOLOCK) WHERE CRMContact.StateCode=0 AND CRMContact.new_countryregionidName=@Country )
+	       
+				BEGIN
+				 SET @SQLQuery=@SQLQuery+' AND CRMContact.new_countryregionidName=@Country'
+				  		 		SET @ParameterDefinition =  '@Country [NVARCHAR](320),
+									@AthenaFlag bit,
+									@CWLFlag bit'
+					--PRINT @SQLQuery 
+					EXECUTE sp_executesql @SQLQuery, @ParameterDefinition,@Country,@AthenaFlag,@CWLFlag
+
+					INSERT INTO #tblDataImportStatus 
+					SELECT 1 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,@UpdateFields 
+			     END
+				 ELSE 
+					BEGIN
+					INSERT INTO #tblDataImportStatus 
+					SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'Updation of Flag Failed Since the Record with SiteID doesn''t exist in CRM'
+			     END
+				 END
+			ELSE 
+				BEGIN
+				INSERT INTO #tblDataImportStatus 
+				SELECT  0 as Status,@SiteID,@SiteName,@MSTPID,@ScheduleID,@Country,@CWL,@Athena,'The Flag is not updated.Please provide Siteid or MSTPID or ScheduleID'
+			END
+		
+
+	END --While Loop End
+
+
+	-- Status 1:Success
+	-- Status 0:Failure
+	SELECT * from #tblDataImportStatus where Status=1
+	SELECT * from #tblDataImportStatus where Status=0
+
+     DROP TABLE #tblDataImport
+	 DROP TABLE #tblDataImportStatus
+
+END
+
+
+
+
+GO
+
+

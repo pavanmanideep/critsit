@@ -1,0 +1,226 @@
+USE [msdb]
+GO
+
+/****** Object:  Job [Clean POA]    Script Date: 5/12/2017 12:12:13 AM ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [Database Maintenance]    Script Date: 5/12/2017 12:12:13 AM ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Clean POA', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Check Replica (Primary or Secondary)]    Script Date: 5/12/2017 12:12:13 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Check Replica (Primary or Secondary)', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=1, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'if exists (select * from sys.dm_hadr_availability_replica_states where role<>1 and is_local=1) 
+                Begin
+                                RAISERROR(''Quitting the job as this is Secondary Replica'',16, -1, @@servername )
+                End
+', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Clean POA Entires]    Script Date: 5/12/2017 12:12:13 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Clean POA Entires', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'USE [MSCritSit_MSCRM]
+GO
+SET QUOTED_IDENTIFIER ON
+BEGIN TRY
+--BEGIN TRAN t1 
+
+IF NOT EXISTS (SELECT * FROM sys.sysobjects
+WHERE id = object_id(N''[dbo].[ToDeletePOAEntries]'')
+AND ObjectProperty(id, N''IsUserTable'') = 1)
+
+CREATE TABLE ToDeletePoaEntries
+(
+	ObjectId UNIQUEIDENTIFIER,
+	Otc INT
+)
+
+IF NOT EXISTS (SELECT * FROM sys.sysindexes si
+INNER JOIN sys.sysobjects so ON si.id = so.id
+WHERE so.id = OBJECT_ID(N''[dbo].[ToDeletePoaEntries]'')
+AND OBJECTPROPERTY(so.id, N''IsUserTable'') = 1
+AND si.name LIKE ''%mainindex%'')
+
+
+CREATE UNIQUE NONCLUSTERED INDEX [mainindex] ON [ToDeletePoaEntries] 
+(
+	[ObjectId] ASC,
+	[Otc] ASC
+)WITH (STATISTICS_NORECOMPUTE = OFF, SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, ONLINE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+
+----- Insert records to be deleted in ToDeletePoaEntries
+
+-- go through all user-owned entities which are not replicated and don''''t support duplicate detection
+DECLARE entity_cursor CURSOR LOCAL FORWARD_ONLY READ_ONLY
+FOR SELECT DISTINCT e.ObjectTypeCode, e.BaseTableName, a.PhysicalName FROM EntityView e
+INNER JOIN AttributeView a on e.EntityId = a.EntityId AND a.IsPKAttribute = 1
+where e.IsReplicated = 0 AND e.IsDuplicateCheckSupported = 0 AND e.OwnershipTypeMask & 1 = 1
+
+OPEN entity_cursor
+
+DECLARE @baseTableName SYSNAME
+DECLARE @otc NVARCHAR(20)
+DECLARE @primaryKey SYSNAME
+DECLARE @totalCollected INT = 0
+DECLARE @currentCollected INT
+DECLARE @tempRowCount INT = 0
+DECLARE @collectstatement NVARCHAR(max)
+
+FETCH NEXT FROM entity_cursor
+INTO @otc, @baseTableName, @primaryKey
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+PRINT ''Cleaning up POA for '' + @baseTableName
+
+SET @currentCollected = 0
+
+SET @collectstatement = ''insert into ToDeletePoaEntries(ObjectId, Otc) 
+select distinct poa.ObjectId, poa.ObjectTypeCode 
+from PrincipalObjectAccess poa
+left join '' + @baseTableName + '' e on poa.ObjectId = e.'' + @primaryKey + 
+'' where e.'' + @primaryKey + '' is null and poa.ObjectTypeCode = '' + @otc;
+
+PRINT @collectstatement
+
+EXEC(@collectstatement)
+SET @tempRowCount = @@ROWCOUNT
+SET @currentCollected = @currentCollected + @tempRowCount
+PRINT CAST(@currentCollected AS NVARCHAR(20)) + '' records collected for '' + @baseTableName
+SET @totalCollected = @totalCollected + @currentCollected
+
+FETCH NEXT FROM entity_cursor
+INTO @otc, @baseTableName, @primaryKey
+END
+
+CLOSE entity_cursor
+DEALLOCATE entity_cursor
+
+PRINT CAST(@totalCollected AS NVARCHAR(20)) + '' total records collected''
+
+-- Delete query 
+-- This scripts cleans up orphaned POA records for selected entities
+
+DECLARE @deleteBatchSize INT = 5000
+DECLARE @deleteBatchSizeNVarChar NVARCHAR(10) = CAST(@deleteBatchSize AS NVARCHAR(10))
+DECLARE @totalDeleted INT = 0
+DECLARE @currentDeleted INT
+DECLARE @deletestatement NVARCHAR(MAX)
+DECLARE @TransName NVARCHAR(15)
+DECLARE @transcnt INT  = 0
+SET @currentDeleted = 0
+SET @tempRowCount = 0
+
+-- delete all records of the current entity type which don''''t have corresponding object in the base table
+SET @deletestatement = ''delete top ('' + @deleteBatchSizeNVarChar + '') from PrincipalObjectAccess
+from PrincipalObjectAccess poa
+join ToDeletePoaEntries e on poa.ObjectId = e.ObjectId and poa.ObjectTypeCode = e.Otc''
+
+PRINT @deletestatement
+
+-- delete PrincipalObjectAccess records in batches
+EXEC(@deletestatement)
+SET @tempRowCount = @@ROWCOUNT
+SET @currentDeleted = @currentDeleted + @tempRowCount
+
+WHILE @tempRowCount = @deleteBatchSize
+BEGIN
+	SET @TransName = ''T'' + CAST(@transcnt as nvarchar(10)) 
+	PRINT @TransName
+	BEGIN TRAN @TransName
+		EXEC(@deletestatement)
+		SET @tempRowCount = @@ROWCOUNT
+		SET @currentDeleted = @currentDeleted + @tempRowCount
+	COMMIT TRAN @TransName
+
+	SET @transcnt = @transcnt + 1
+ 
+	PRINT CAST(@currentDeleted AS NVARCHAR(20)) + '' records deleted '' + cast(GETUTCDATE() AS NVARCHAR(50))
+	--cleanup
+END
+	--COMMIT TRAN t1
+	-- Cleanup
+	DROP Table ToDeletePoaEntries
+	PRINT ''EXECUTION SUCCEED''
+END TRY
+BEGIN CATCH
+	--ROLLBACK TRAN t1
+	-- Cleanup
+	DROP Table ToDeletePoaEntries
+	PRINT ''EXECUTION FAILED :'' + ERROR_MESSAGE()
+END CATCH
+
+-- Added for crm deletion service maintenance job
+DELETE FROM PrincipalObjectAccess WHERE (AccessRightsMask = 0 OR AccessRightsMask IS NULL) and(InheritedAccessRightsMask = 0 OR InheritedAccessRightsMask IS NULL)   
+  
+DELETE FROM PrincipalObjectAccess  FROM PrincipalObjectAccess poa
+JOIN SubscriptionTrackingDeletedObject o (NOLOCK) ON (o.ObjectId = poa.ObjectId AND o.ObjectTypeCode=poa.ObjectTypeCode) 
+             
+DELETE FROM SubscriptionTrackingDeletedObject
+WHERE TimeStamp <=(SELECT convert(timestamp, coalesce(min(CompletedSyncVersionNumber), @@dbts)) FROM Subscription(NOLOCK));', 
+		@database_name=N'MSCritSit_MSCRM', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Weekly', 
+		@enabled=1, 
+		@freq_type=8, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=1, 
+		@active_start_date=20130727, 
+		@active_end_date=99991231, 
+		@active_start_time=213000, 
+		@active_end_time=235959, 
+		@schedule_uid=N'f76bec4a-e08b-4b6c-97de-984bbd4314d5'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+
