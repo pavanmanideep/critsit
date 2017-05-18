@@ -1,0 +1,832 @@
+USE [CritSit]
+GO
+
+/****** Object:  StoredProcedure [dbo].[p_BuildCCList]    Script Date: 5/18/2017 12:32:24 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+-- Batch submitted through debugger: SQLQuery14.sql|7|0|C:\Users\ccrmdeva\AppData\Local\Temp\2\~vsCC.sql
+
+
+
+
+--exec p_BuildCCList '111100628745167','1001' 
+--exec p_BuildCCList1 '111100628745167','1001' 
+
+                     
+/*                    
+--***************************************************************************************--                    
+-- Script Name       : p_BuildccList_with_Logging.sql                    
+-- Feature name      : Critsit                    
+-- Work Item No      :                    
+-- Author            : Joychandra Singh Mutum (v-joychm)                    
+-- Created Date      : 2009-Nov-11                    
+-- Description       : p_BuildccList modified to capture logging info                    
+-- Vesion History                    
+--    YYYY-MMM-DD alias   : Description of Changes                    
+--    2009-Nov-11         : Modified to capture logging info              
+--    2010-Feb-01 RayMetz : Delete log entries that are not returned for cc list              
+--                          Added ExecutionTimeStamp to result set              
+--    2010-Feb-03 RayMetz : Added detailed logging    
+--    2012-Feb-01 v-masuri: Added the email address field in the resultset   
+--    2014-Jun-09 v-arvsin: To fix OOF backup issue for some notification, 1019,1023,1040
+--***************************************************************************************--                    
+*/                    
+                    
+                    
+--exec p_BuildCCList '999981249939104', '1001'            
+                    
+                    
+CREATE PROC [dbo].[p_BuildCCList]                           
+(  @srnumber  VARCHAR(100)                                    
+ , @notificationno VARCHAR(100)      = NULL              
+)          WITH RECOMPILE                          
+AS              
+SET NOCOUNT ON                             
+BEGIN                                
+              
+      DECLARE @WithDetailLogging BIT              
+      SET @WithDetailLogging = 0              
+              
+      IF (SELECT TOP 1 AllowTrace FROM CritSit.dbo.Trace) = 'Y'              
+        SET @WithDetailLogging = 1              
+                    
+      DECLARE @ExecutionTimestamp VARCHAR(50)                    
+                      
+      -- CAPTURE the time for UNIQUE Values for all entries   
+	  --modified datatye from nvarchar to datetime
+      SET @ExecutionTimestamp = convert(datetime,GetUTCDate(),126)                    
+                                  
+      DECLARE @querystring    NVARCHAR(4000)              
+      DECLARE @ccLogId INT              
+                    
+      IF @WithDetailLogging = 1              
+      BEGIN              
+            INSERT INTO CritSit.dbo.ccLog(              
+                  SRNumber,              
+                  NotificationNo,              
+                  StartTimestamp)              
+            SELECT              
+                  @SRnumber,              
+                  @NotificationNo,              
+                  @ExecutionTimestamp              
+                                
+            SET @ccLogId = @@IDENTITY              
+                          
+            INSERT INTO CritSit.dbo.ccLogIncident              
+                  (ccLogId,              
+                  IncidentId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  New_CaseID,              
+                  new_tambackupleadid,              
+                  new_tamleadid)              
+            SELECT              
+                  @ccLogId,              
+                  IncidentId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  New_CaseID,              
+                  new_tambackupleadid,              
+                  new_tamleadid              
+            FROM MSCRITSIT_MSCRM.dbo.incident              
+            WHERE new_caseid = @srnumber              
+              
+            INSERT INTO CritSit.dbo.ccLogLead              
+                  (ccLogId,              
+                  LeadId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,     
+                  New_Alias)              
+            SELECT              
+                  @ccLogId,              
+                  L.LeadId,              
+                  L.CreatedOn,              
+                  L.CreatedBy,              
+                  L.ModifiedOn,              
+                  L.ModifiedBy,              
+                  L.New_Alias              
+            FROM MSCRITSIT_MSCRM.dbo.Lead L              
+            WHERE leadid IN                                    
+                   (                                    
+                   SELECT new_tamleadid                                     
+      FROM MSCRITSIT_MSCRM.dbo.incident                                      
+                    WHERE new_caseid = @srnumber                                     
+                        AND new_tamleadid IS NOT NULL                        
+                    UNION ALL                                    
+                   SELECT new_tambackupleadid                                     
+                     FROM MSCRITSIT_MSCRM.dbo.incident                                      
+                    WHERE new_caseid = @srnumber                                     
+                        AND new_tambackupleadid IS NOT NULL                                    
+                     )              
+                          
+            INSERT INTO CritSit.dbo.ccLogSystemUser              
+                  (ccLogId,              
+                  SystemUserId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  DomainName,              
+                  new_Alias,              
+                  new_Manager)              
+            SELECT DISTINCT              
+                  @ccLogId,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.SystemUserId,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.CreatedOn,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.CreatedBy,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.ModifiedOn,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.ModifiedBy,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.DomainName,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.new_Alias,              
+                  MSCRITSIT_MSCRM.dbo.systemuser.new_Manager               
+            FROM MSCRITSIT_MSCRM.dbo.systemuser                                         
+            JOIN MSCRITSIT_MSCRM.dbo.new_oofbackup                                      
+            ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupforuserid = systemuser.systemuserid            
+   AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0                                    
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statecode = 0                              
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statuscode=1                            
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/                                    
+            WHERE new_alias IN                                    
+            (                                     
+    SELECT new_alias                           
+     FROM MSCRITSIT_MSCRM.dbo.lead                                    
+     WHERE leadid IN                                    
+     (                                    
+      SELECT new_tamleadid                                     
+       FROM MSCRITSIT_MSCRM.dbo.incident                                      
+       WHERE new_caseid = @srnumber                                     
+       AND new_tamleadid IS NOT NULL                                    
+      UNION ALL                                    
+      SELECT new_tambackupleadid                                     
+       FROM MSCRITSIT_MSCRM.dbo.incident                                      
+       WHERE new_caseid = @srnumber                                     
+       AND new_tambackupleadid IS NOT NULL                                    
+     )                    
+     )                                    
+              
+            INSERT INTO CritSit.dbo.ccLognew_OofBackup              
+                  (ccLogId,              
+                  new_OofBackupId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+          ModifiedBy,              
+                  new_BackupById,              
+                  new_BackupForUserId)              
+            SELECT              
+                  @ccLogId,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.new_OofBackupId,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.CreatedOn,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.CreatedBy,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.ModifiedOn,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.ModifiedBy,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.new_BackupById,              
+                  MSCRITSIT_MSCRM.dbo.new_oofbackup.new_BackupForUserId               
+            FROM MSCRITSIT_MSCRM.dbo.systemuser                                         
+            JOIN MSCRITSIT_MSCRM.dbo.new_oofbackup                                      
+   ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupforuserid = systemuser.systemuserid            
+   AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0            
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statecode = 0                              
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statuscode=1                            
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/                                    
+   WHERE new_alias IN                                    
+   (                    
+    SELECT new_alias                           
+    FROM MSCRITSIT_MSCRM.dbo.lead                                    
+    WHERE leadid IN                                    
+    (                                    
+     SELECT new_tamleadid                                     
+      FROM MSCRITSIT_MSCRM.dbo.incident                                      
+      WHERE new_caseid = @srnumber                                     
+      AND new_tamleadid IS NOT NULL                                    
+     UNION ALL                                    
+     SELECT new_tambackupleadid                                     
+      FROM MSCRITSIT_MSCRM.dbo.incident                                      
+      WHERE new_caseid = @srnumber                                     
+      AND new_tambackupleadid IS NOT NULL                                    
+    )                    
+   )              
+     END -- Detail Logging              
+    
+  SELECT @notificationno = CASE @notificationno                                    
+    WHEN '1001' THEN 'New_1001'                                    
+    WHEN '1002' THEN 'New_1002'                          
+    WHEN '1004' THEN 'New_1004'                        
+    WHEN '1009' THEN 'New_1009'                        
+    WHEN '1010' THEN 'New_1010'                          
+    WHEN '1012' THEN 'New_1012'                        
+    WHEN '1013' THEN 'New_1013'                         
+    WHEN '1014' THEN 'New_1014'                                 
+    WHEN '1015' THEN 'New_1015'                         
+    WHEN '1016' THEN 'New_1016'                          
+    WHEN '1017' THEN 'New_1017'                                                   
+    WHEN '1019' THEN 'New_1019'                                                               
+    WHEN '1023' THEN 'New_1023'                        
+    WHEN '1024' THEN 'New_1024'                                      
+    WHEN '1026' THEN 'New_1026'                                    
+    WHEN '1027' THEN 'New_1027'                                    
+    WHEN '1029' THEN 'New_1029'                      
+    WHEN '1032' THEN 'New_1032'                              
+    WHEN '1033' THEN 'New_1033'                     
+    WHEN '1040' THEN 'New_1040'                                  
+    WHEN '1061' THEN 'New_1061'          
+--Begin of Added by v-upunya NQR2010                                
+    WHEN '1108' THEN 'New_1108'         
+    WHEN '1109' THEN 'New_1109'         
+    WHEN '1110' THEN 'New_1110'         
+--End of Added by v-upunya NQR2010          
+    WHEN '1117' THEN 'New_1117'         
+    WHEN '1119' THEN 'New_1119'         
+    WHEN '1116' THEN 'New_1116'         
+    WHEN '1123' THEN 'New_1123'         
+    WHEN '1129' THEN 'New_1129'      
+ --Added for CritSit MQR 4.0        
+    WHEN '1113' THEN 'New_1013'                         WHEN '1114' THEN 'New_1014'                                    
+    ELSE NULL                                    
+  END              
+              
+  IF @notificationno IS NULL                                
+  BEGIN                       
+  INSERT INTO CritSit.dbo.BuildCCList_Log                                    
+  SELECT                     
+   @srnumber, @NotificationNo, @ExecutionTimestamp,                    
+   MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupbyid,NULL, 'email' ,'All'                                   
+   FROM MSCRITSIT_MSCRM.dbo.systemuser                                         
+JOIN MSCRITSIT_MSCRM.dbo.new_oofbackup                                      
+   ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupforuserid = systemuser.systemuserid            
+   AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0                                   
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statecode = 0                              
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statuscode=1                            
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/                                    
+   WHERE new_alias IN                                    
+   (                                     
+    SELECT new_alias                           
+    FROM MSCRITSIT_MSCRM.dbo.lead                                    
+    WHERE leadid IN                                    
+    (                                    
+     SELECT new_tamleadid                                     
+      FROM MSCRITSIT_MSCRM.dbo.incident                         
+      WHERE new_caseid = @srnumber                                     
+      AND new_tamleadid IS NOT NULL                                         
+    )                    
+   )         
+         
+       
+      
+                  
+                                  
+  SELECT DISTINCT id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress              
+  FROM CritSit.dbo.BuildCCList_Log  BCC      
+  LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId  
+  LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId      
+  WHERE ExecutionTimestamp = @ExecutionTimestamp AND SRNumber = @srnumber           
+  AND      
+            (L.LeadId IS NULL -- System User or any non Lead      
+            OR L.EMailAddress1 like '%microsoft.com' -- Lead with proper suffix      
+            ) 
+             AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                                                                                                                                                                   
+  RETURN                                     
+  END                              
+              
+DECLARE @CustomerId UniqueIdentifier            
+SET @CustomerId = Null            
+            
+--SELECT @CustomerId=CustomerId FROM MSCRITSIT_MSCRM.dbo.incident  -- Before Modification by v-upunya AQR2010           
+SELECT @CustomerId=new_site FROM MSCRITSIT_MSCRM.dbo.incident -- Modified by v-upunya AQR2010              
+WHERE new_caseid=@srnumber    
+  
+
+            
+/*Get OOF FOR (TAM & Backup TAM)*/                                    
+ INSERT INTO CritSit.dbo.BuildCCList_Log            
+--  Insert into Build CC Log when OOF Back Up is Persistent                                    
+ SELECT                     
+  @SRNumber, @NotificationNo, @ExecutionTimestamp,                    
+  MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupbyid,NULL, 'email' ,'All'                                   
+  FROM MSCRITSIT_MSCRM.dbo.systemuser                                        
+  JOIN MSCRITSIT_MSCRM.dbo.new_oofbackup                                     
+  ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupforuserid = systemuser.systemuserid            
+  AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0            
+  AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statecode = 0               
+  AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statuscode=1                            
+  --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/              
+  AND MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupschedule=1            
+  LEFT JOIN MSCRITSIT_MSCRM.dbo.new_new_oofbackup_contact -- Modified by v-upunya AQR2010              
+              ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_oofbackupid = MSCRITSIT_MSCRM.dbo.new_new_oofbackup_contact.new_oofbackupid  -- Modified by v-upunya AQR2010              
+            WHERE @CustomerId IS NULL or @CustomerId=ISNULL( MSCRITSIT_MSCRM.dbo.new_new_oofbackup_contact.contactid,@CustomerId) -- Modified by v-upunya AQR2010              
+--ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_oofbackupid = MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.new_oofbackupid  -- Before Modification by v-upunya AQR2010          
+--WHERE @CustomerId IS NULL or @CustomerId=ISNULL( MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.accountid,@CustomerId)  -- Before Modification by v-upunya AQR2010          
+  AND new_alias IN                                    
+  (                                     
+   SELECT new_alias                                     
+   FROM MSCRITSIT_MSCRM.dbo.lead                                    
+   WHERE leadid IN                                    
+   (                                    
+    SELECT new_tamleadid                                     
+    FROM MSCRITSIT_MSCRM.dbo.incident                                      
+    WHERE new_caseid = @srnumber                                     
+    AND new_tamleadid IS NOT NULL                                    
+   )                                      
+  )             
+ UNION ALL            
+--  Insert into Build CC Log when OOF Back Up By Date and Time            
+ SELECT                     
+  @SRNumber, @NotificationNo, @ExecutionTimestamp,                    
+  MSCRITSIT_MSCRM.dbo.New_oofbackup.new_backupbyid,NULL, 'email' ,'All'                                   
+  FROM MSCRITSIT_MSCRM.dbo.systemuser                                        
+  JOIN MSCRITSIT_MSCRM.dbo.New_oofbackup                                    
+  ON MSCRITSIT_MSCRM.dbo.New_oofbackup.new_backupforuserid = systemuser.systemuserid                
+  AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0                                
+  AND MSCRITSIT_MSCRM.dbo.New_oofbackup.statecode = 0               
+  AND MSCRITSIT_MSCRM.dbo.New_oofbackup.statuscode=1                            
+  --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/              
+  AND MSCRITSIT_MSCRM.dbo.New_oofbackup.new_backupschedule=2    
+
+  --AND Convert(date,MSCRITSIT_MSCRM.dbo.New_oofbackup.new_start) <= Convert(date,getUTCDate())
+  --AND Convert(date,MSCRITSIT_MSCRM.dbo.New_oofbackup.new_end) >= Convert(date,getUTCDate())
+         
+  --AND Convert(nvarchar,MSCRITSIT_MSCRM.dbo.New_oofbackup.New_Start,101)  <= Convert(nvarchar,getUTCDate(),101)             
+  --AND Convert(nvarchar,MSCRITSIT_MSCRM.dbo.New_oofbackup.New_End,101) >= Convert(nvarchar,getUTCDate(),101) 
+  
+  -- OOF Backup fix by DateTime as a part of June 14 Release changes by v-arvsin
+ -- AND Convert(nvarchar(20),MSCRITSIT_MSCRM.dbo.New_oofbackup.New_StartDate,100)  <= Convert(nvarchar(20),getUtcDate(),100)  --10/15/2015
+  AND DateDiff(mi,MSCRITSIT_MSCRM.dbo.New_oofbackup.New_StartDate,getUtcDate()) >= 0
+ -- AND Convert(nvarchar(20),MSCRITSIT_MSCRM.dbo.New_oofbackup.New_EndDate,100) >= Convert(nvarchar(20),getUtcDate(),100)  --10/15/2015
+  AND DateDiff(mi,getUtcDate(),MSCRITSIT_MSCRM.dbo.New_oofbackup.New_EndDate) >= 0
+           
+  LEFT JOIN MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account             
+  ON MSCRITSIT_MSCRM.dbo.New_oofbackup.new_oofbackupid = MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.new_oofbackupid            
+  WHERE @CustomerId IS NULL or @CustomerId=ISNULL( MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.accountid,@CustomerId)            
+  AND new_alias IN                                    
+  (                                     
+   SELECT new_alias            
+   FROM MSCRITSIT_MSCRM.dbo.lead                                    
+   WHERE leadid IN                                    
+   (                                    
+    SELECT new_tamleadid                                     
+    FROM MSCRITSIT_MSCRM.dbo.incident                                      
+    WHERE new_caseid = @srnumber                                     
+    AND new_tamleadid IS NOT NULL                                    
+   )                                      
+  )            
+ UNION ALL            
+--  Insert into Build CC Log when OOF Back Up By Day of the week            
+ SELECT SRNumber, NotificationNo, ExecTime, Id, MSContactId, UType, [Type]            
+ FROM (SELECT @SRNumber  [SRNumber], @NotificationNo [NotificationNo], @ExecutionTimestamp[ExecTime],                    
+   MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupbyid [Id],NULL [MSContactId], 'email' [UType],'All' [Type]            
+   ,dbo.GetDay(MSCRITSIT_MSCRM.dbo.new_oofbackup.new_oofbackupid) [Flag]                                  
+   FROM MSCRITSIT_MSCRM.dbo.systemuser                                        
+   JOIN MSCRITSIT_MSCRM.dbo.new_oofbackup                                     
+   ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupforuserid = systemuser.systemuserid            
+   AND MSCRITSIT_MSCRM.dbo.systemuser.IsDisabled = 0                                   
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statecode = 0               
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.statuscode=1                            
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.deletionstatecode<>2        /*OOF is Active*/              
+   AND MSCRITSIT_MSCRM.dbo.new_oofbackup.new_backupschedule=3             
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.New_Start<= getUTCDate()             
+   --AND MSCRITSIT_MSCRM.dbo.new_oofbackup.New_End>= getUTCDate()  
+    
+   ---- OOF Backup fix by Day of Week as a part of June 14 Release changes by v-arvsin
+   --changed AND CONVERT(VARCHAR(20), MSCRITSIT_MSCRM.dbo.New_oofbackup.New_StartDate, 100) <= Convert(nvarchar(20),getUtcDate(),100) 
+   AND DateDiff(mi,MSCRITSIT_MSCRM.dbo.New_oofbackup.New_StartDate,getUtcDate()) >= 0
+
+   --changed AND CONVERT(VARCHAR(20), MSCRITSIT_MSCRM.dbo.New_oofbackup.New_EndDate, 100) >= Convert(nvarchar(20),getUtcDate(),100) 
+   AND DateDiff(mi,getUtcDate(),MSCRITSIT_MSCRM.dbo.New_oofbackup.New_EndDate) >= 0
+           
+   LEFT JOIN MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account             
+   ON MSCRITSIT_MSCRM.dbo.new_oofbackup.new_oofbackupid = MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.new_oofbackupid            
+   WHERE @CustomerId IS NULL or @CustomerId =ISNULL( MSCRITSIT_MSCRM.dbo.new_new_oofbackup_account.accountid, @CustomerId )                            
+   AND new_alias IN                                    
+   (                                     
+    SELECT new_alias                     
+    FROM MSCRITSIT_MSCRM.dbo.lead                                    
+    WHERE leadid IN                                    
+    (                                    
+     SELECT new_tamleadid                                     
+     FROM MSCRITSIT_MSCRM.dbo.incident                                      
+     WHERE new_caseid =  @srnumber                                      
+     AND new_tamleadid IS NOT NULL                                        
+    )                                      
+   )            
+ ) A WHERE A.Flag='True'                                  
+            
+            
+      IF @WithDetailLogging = 1              
+      BEGIN              
+            INSERT INTO ccLognew_AssociatedMember              
+                  (ccLogId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  new_AssociatedMemberId,              
+                  new_subscriberisacritsituser,              
+                  new_alias,              
+                  new_MemberNameId,              
+                  new_membernameidYomiName,               
+                  InternalEmailAddress,              
+                  new_EmailContactsId,              
+                  FullName,               
+                  EmailAddress1,              
+                  new_1001,              
+                  new_1002,              
+                  new_1004,              
+                  new_1009,              
+                  new_1010,              
+                  new_1012,              
+                  new_1013,              
+                  new_1014,              
+                  new_1015,              
+                  new_1016,              
+                  new_1017,              
+                  new_1019,              
+                  new_1023,              
+                  new_1024,              
+                  new_1027,              
+                  new_1026,              
+                  new_1029,              
+                  new_1032,              
+                  new_1033,              
+                  new_1040,              
+                  new_1061,        
+--Begin of Added byv-upunya during NQR2010              
+                  new_1108,        
+                  new_1109,        
+                  new_1110,        
+ --End of Added byv-upunya during NQR2010         
+                  new_1117,        
+                  new_1119,        
+            new_1116,        
+                  new_1123,        
+                  new_1129)              
+         SELECT              
+                  @ccLogId,              
+                  A.CreatedOn,              
+                  A.CreatedBy,              
+                  A.ModifiedOn,              
+                  A.ModifiedBy,              
+                  A.new_AssociatedMemberId,              
+                  A.new_subscriberisacritsituser,              
+                  A.new_alias,              
+                  A.new_MemberNameId,              
+                  A.new_membernameidYomiName,               
+                  U.InternalEmailAddress,              
+                  A.new_EmailContactsId,              
+                  L.FullName,               
+                  L.EmailAddress1,              
+                  A.new_1001,              
+                  A.new_1002,              
+                  A.new_1004,              
+                  A.new_1009,              
+                  A.new_1010,              
+                  A.new_1012,              
+                  A.new_1013,              
+                  A.new_1014,              
+                  A.new_1015,              
+                  A.new_1016,              
+                  A.new_1017,              
+           A.new_1019,              
+                  A.new_1023,              
+                  A.new_1024,              
+                  A.new_1027,              
+                  A.new_1026,              
+                  A.new_1029,              
+                  A.new_1032,              
+                  A.new_1033,              
+                  A.new_1040,              
+                  A.new_1061,        
+--Begin of Added by v-upunya During NQR2010        
+                  A.new_1108,        
+                  A.new_1109,        
+                  A.new_1110,        
+ --End of Added by v-upunya During NQR2010        
+                  A.New_1117,        
+                  A.New_1119,        
+                  A.New_1116,        
+                  A.New_1123,        
+                 A.new_1129         
+            
+            FROM MSCRITSIT_MSCRM.dbo.new_associatedmember              A                                     
+            JOIN MSCRITSIT_MSCRM.dbo.new_new_associatedmember_incident B ON A.new_associatedmemberid = B.new_associatedmemberid AND A.StateCode=0                               
+            JOIN MSCRITSIT_MSCRM.dbo.incident                          C ON C.incidentID = B.incidentid              
+            LEFT JOIN MSCRITSIT_MSCRM.dbo.Lead                         L ON L.LeadId = A.new_EmailContactsId              
+            LEFT JOIN MSCRITSIT_MSCRM.dbo.SystemUser                   U ON U.SystemUserId = A.new_MemberNameId            
+            WHERE C.new_caseid = @SRNUMBER  /*SR number*/              
+              AND NOT (U.SystemUserId IS NOT NULL AND U.IsDisabled = 1)            
+              
+            INSERT INTO ccLognew_new_AssociatedMember_Incident              
+                  (ccLogId,              
+                  new_new_AssociatedMember_IncidentId,              
+              new_AssociatedMemberId,              
+                  IncidentId)              
+            SELECT              
+                  @ccLogId,              
+                  A.new_new_AssociatedMember_IncidentId,              
+                  A.new_AssociatedMemberId,              
+                  A.IncidentId              
+            FROM MSCRITSIT_MSCRM.dbo.new_new_AssociatedMember_Incident A              
+            JOIN MSCRITSIT_MSCRM.dbo.incident I ON A.IncidentId = I.IncidentId              
+            WHERE I.new_caseid = @srnumber              
+              
+            INSERT INTO CritSit.dbo.ccLognew_OofBackup              
+                  (ccLogId,              
+                  new_OofBackupId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  new_BackupById,              
+                  new_BackupForUserId)              
+            SELECT              
+                  @ccLogId,              
+                  O.new_OofBackupId,              
+                  O.CreatedOn,              
+                  O.CreatedBy,              
+                  O.ModifiedOn,              
+                  O.ModifiedBy,              
+                  O.new_BackupById,              
+                  O.new_BackupForUserId               
+            FROM MSCRITSIT_MSCRM.dbo.new_oofbackup O              
+            JOIN (SELECT DISTINCT new_membernameid              
+FROM CritSit.dbo.ccLognew_AssociatedMember              
+                  WHERE new_subscriberisacritsituser = 1) A ON O.new_backupforuserid = A.new_membernameid              
+            WHERE NOT EXISTS(SELECT 1 FROM CritSit.dbo.ccLognew_OofBackup X WHERE X.ccLogId = @ccLogId AND O.new_OofBackupId = X.new_OofBackupId)              
+              
+                               
+            INSERT INTO CritSit.dbo.ccLogLead              
+                  (ccLogId,              
+                  LeadId,              
+                  CreatedOn,              
+                  CreatedBy,              
+                  ModifiedOn,              
+                  ModifiedBy,              
+                  New_Alias)              
+            SELECT              
+                  @ccLogId,              
+                  LM.LeadId,              
+                  LM.CreatedOn,              
+                  LM.CreatedBy,              
+                  LM.ModifiedOn,              
+                  LM.ModifiedBy,              
+                  LM.New_Alias              
+            FROM  MSCRITSIT_MSCRM.dbo.lead LM                 
+            WHERE new_alias in(                                  
+                        SELECT      systemuser.new_manager                             
+                        FROM  MSCRITSIT_MSCRM.dbo.systemuser                                        
+                        WHERE systemuser.systemuserid IN (              
+                                                SELECT s.systemuserid                         
+                                                FROM MSCRITSIT_MSCRM.dbo.new_associatedmember A                         
+                                                JOIN MSCRITSIT_MSCRM.dbo.new_new_associatedmember_incident B                          
+          ON A.new_associatedmemberid = B.new_associatedmemberid                                     
+                                                JOIN MSCRITSIT_MSCRM.dbo.incident C                            
+                                                ON  C.incidentID = B.incidentid                              
+                                                JOIN MSCRITSIT_MSCRM.dbo.lead l                                   
+                                                ON C.new_tamleadid = l.leadid                      
+                    JOIN MSCRITSIT_MSCRM.dbo.systemuser s                      
+            ON l.new_alias=s.new_alias                        
+                                                AND C.new_caseid = @SRNUMBER /*SR number*/                                                
+                                                --AND A.' + @notificationno + '= 1                                  
+                                                )               
+                                    AND systemuser.new_manager is not null            
+         AND systemuser.IsDisabled = 0              
+                        )              
+                  AND NOT EXISTS(SELECT 1 FROM CritSit.dbo.ccLogLead X WHERE X.ccLogId = @ccLogId AND X.LeadId = LM.LeadId)              
+      END -- Detail Logging              
+                    
+  /*Get CC List */                                    
+  --INSERT INTO #cclist            
+                                    
+  SELECT @querystring =                                     
+  'SELECT ''' + @SRNumber +''' , ''' + @NotificationNo +''' , ''' +  @ExecutionTimestamp + ''',new_membernameid,                     
+  A.new_associatedmemberid,                      
+  CASE new_subscriberisacritsituser                                     
+  WHEN 1 THEN ''systemuser''                                     
+  ELSE        ''email''                                       
+  END,''Sub''                                         
+  FROM MSCRITSIT_MSCRM.dbo.new_associatedmember A                                     
+  JOIN MSCRITSIT_MSCRM.dbo.new_new_associatedmember_incident B                                    
+  ON A.new_associatedmemberid = B.new_associatedmemberid                   
+  AND A.StateCode=0            
+  LEFT JOIN MSCRITSIT_MSCRM.dbo.SystemUSer D                                    
+  ON A.new_membernameid = D.SystemUserId            
+  JOIN MSCRITSIT_MSCRM.dbo.incident C                                    
+  ON C.incidentID = B.incidentid                                    
+  AND C.new_caseid =''' + @SRNUMBER +'''  /*SR number*/                                    
+  AND A.' + @notificationno + '= 1             
+        WHERE NOT (A.new_membernameid IS NOT NULL AND D.IsDisAbled = 1)            
+                           
+  UNION ALL                                    
+                                    
+  /*Manager for CC list*/             
+               
+  SELECT ''' + @SRNumber +''' , ''' + @NotificationNo +''' , ''' + @ExecutionTimestamp+  ''',LeadId,                    
+  NULL,''email'',''MGR''             
+  FROM MSCRITSIT_MSCRM.dbo.lead                       
+  WHERE new_alias in            
+  (               
+   SELECT S.New_Manager            
+   FROM MSCRITSIT_MSCRM.dbo.incident I            
+   JOIN MSCRITSIT_MSCRM.dbo.Lead L            
+   ON I.new_tamleadid= L.LeadId AND L.StateCode=0 AND I.new_caseid = ''' + @SRNUMBER + '''            
+   JOIN MSCRITSIT_MSCRM.dbo.SystemUser S            
+   ON S.new_alias= L.new_alias AND S.IsDisabled = 0 AND S.New_Manager IS NOT NULL            
+  )'           
+  --AND Deletionstatecode<>2'                    
+                                          
+  IF @notificationno <>'NEW_1032'                          
+   INSERT INTO CritSit.dbo.BuildCCList_Log                                    
+   EXECUTE SP_EXECUTESQL @querystring                              
+                                 
+                                  
+  UPDATE CritSit.dbo.BuildCCList_Log                            
+   SET Id = A.new_emailcontactsId                            
+   FROM CritSit.dbo.BuildCCList_Log                             
+   JOIN MSCRITSIT_MSCRM.dbo.new_associatedmember A                            
+   ON A.new_associatedmemberid=CritSit.dbo.BuildCCList_Log.MSContactId                            
+   WHERE Id IS NULL             
+    AND ExecutionTimestamp = @ExecutionTimestamp             
+    AND NotificationNo = @notificationno             
+    AND SRNumber = @srnumber                    
+              
+IF(   @notificationno='New_1027' or @notificationno='New_1015' or @notificationno='New_1009'                        
+      or @notificationno='New_1016' or @notificationno='New_1013' or @notificationno='New_1014'                        
+      or @notificationno='New_1024' or @notificationno='New_1061' or @notificationno='New_1033'  
+	  or @notificationno='New_1010'        
+--Begin of Added by v-upunya during NQR2010        
+      or @notificationno='New_1108' or @notificationno='New_1109' or @notificationno='New_1110'        
+--End of Added by v-upunya during NQR2010        
+      or @notificationno='New_1123' or @notificationno='New_1116' or @notificationno='New_1117'        
+      or @notificationno='New_1119' or @notificationno='New_1123' or @notificationno='New_1129'        
+)              
+      BEGIN              
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...              
+            DELETE              
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in ('Sub')                 
+            and ExecutionTimestamp = @ExecutionTimestamp AND NotificationNo = @notificationno AND SRNumber = @srnumber         
+          
+                          
+            SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress              
+            FROM CritSit.dbo.BuildCCList_Log  BCC        
+			LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId
+			LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId         
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+            AND      
+            (L.LeadId IS NULL -- System User or any non Lead      
+            OR L.EMailAddress1 like '%microsoft.com' -- Lead with proper suffix      
+            ) 
+            AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                                                                                                                                            
+      END                       
+              
+ELSE IF (@notificationno='New_1001' or @notificationno='New_1002' or @notificationno='New_1004'                        
+      or   @notificationno='New_1029' or @notificationno='New_1026' or @notificationno='New_1032')                        
+      BEGIN              
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...   
+              
+                      
+            DELETE              
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in('All','Sub','OOF','MGR')               
+            and ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber           
+                    
+                                
+                  
+              
+			SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress             
+            FROM CritSit.dbo.BuildCCList_Log  BCC        
+			LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId    
+			LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId   
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+            AND                                
+			(L.LeadId IS NULL -- System User or any non Lead      
+			OR L.EMailAddress1 like '%microsoft.com'   -- Lead with proper suffix      
+			)        
+            AND
+            (S.SystemUserId IS NULL 
+            OR S.InternalEMailAddress like '%microsoft.com')                                                                                                                                                                              
+      END                        
+              
+ELSE IF(@notificationno='New_1017')              
+      BEGIN                      
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...              
+            DELETE              
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in ('Sub','MGR','OOF','All')      -- Added OOF and All in NOT IN 12May14 by v-arvsin         
+            and ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber                 
+                            
+            SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress              
+            FROM CritSit.dbo.BuildCCList_Log  BCC        
+			LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId 
+			LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId        
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+			AND      
+			(L.LeadId IS NULL -- System User or any non Lead      
+			OR L.EMailAddress1 like '%microsoft.com'   -- Lead with proper suffix      
+			) 
+			AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                                                                                                                            
+      END     
+	  
+ELSE IF(@notificationno='New_1023' or @notificationno='New_1040')        -- Added by v-arvsin to add OOF Backup in 1023 and 1040 notification on 12May14    
+      BEGIN                      
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...              
+            DELETE              
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in ('Sub','OOF','All')      -- Added OOF and All in NOT IN 12May14 by v-arvsin         
+            and ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber                 
+                            
+            SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress              
+            FROM CritSit.dbo.BuildCCList_Log  BCC        
+			LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId 
+			LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId        
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+			AND      
+			(L.LeadId IS NULL -- System User or any non Lead      
+			OR L.EMailAddress1 like '%microsoft.com'   -- Lead with proper suffix      
+			) 
+			AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                                                                                                                            
+      END            
+             
+ ELSE IF(@notificationno='New_1019')              
+      BEGIN                      
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...              
+            DELETE              
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in ('All','Sub','OOF','MGR')               
+            and ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber                 
+                                     
+            SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress             
+            FROM CritSit.dbo.BuildCCList_Log  BCC       
+            LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId   
+            LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId      
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+            AND      
+            ( L.LeadId IS NULL -- System User or any non Lead      
+            OR L.EMailAddress1 like '%microsoft.com' -- Lead with proper suffix      
+            ) 
+            AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                                                                   
+      END              
+            
+ELSE IF(@notificationno='New_1012')                        
+      BEGIN              
+            -- 2010-02-02, RayMetz, Added delete statements where flag NOT in...              
+            DELETE                
+            FROM CritSit.dbo.BuildCCList_Log               
+            WHERE flag NOT in ('All','Sub','OOF')               
+            and ExecutionTimestamp = @ExecutionTimestamp AND NotificationNo = @notificationno AND SRNumber = @srnumber               
+                                   
+            SELECT distinct id, aliastype, @ExecutionTimestamp ExecutionTimestamp, @ccLogId ccLogId,ISNULL(L.EMailAddress1,S.InternalEMailAddress) EmailAddress             
+            FROM CritSit.dbo.BuildCCList_Log  BCC        
+			LEFT JOIN  MSCRITSIT_MSCRM.dbo.Lead L ON BCC.Id=L.LeadId  
+			LEFT JOIN  MSCritSit_MSCRM.dbo.SystemUser S ON BCC.Id=S.SystemUserId       
+			WHERE ExecutionTimestamp = @ExecutionTimestamp  AND NotificationNo = @notificationno AND SRNumber = @srnumber        
+            AND      
+            ( L.LeadId IS NULL -- System User or any non Lead      
+            OR L.EMailAddress1 like '%microsoft.com' -- Lead with proper suffix      
+            )  
+            AND
+			(S.SystemUserId IS NULL 
+			OR S.InternalEMailAddress like '%microsoft.com')                                
+                 
+                                                                                                          
+      END                   
+--DROP TABLE #cclist                        
+                           
+END         
+      
+      
+      
+      
+
+
+
+
+
+
+
+GO
+
+
