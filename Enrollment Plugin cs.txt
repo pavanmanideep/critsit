@@ -1,0 +1,1832 @@
+using AWE.Evolution.Plugins.ETSPayment;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+using System;
+using System.ServiceModel;
+using System.Linq;
+using Microsoft.Xrm.Sdk.Client;
+using AWE.Evolution.Plugins.Helper;
+
+namespace AWE.Evolution.Plugins
+{
+
+    public class Enrollment : Plugin
+    {
+        private const int ENROLLMENT_STATUS_REENROLL = 1;
+        private const int ENROLLMENT_STATUS_CANCELLED = 4;
+        private const string LOCATIONCODE_CA100 = "CA100";
+        private const string LOCATIONCODE_VA100 = "VA100";
+        private const string COUNTRY_USA = "US";
+
+        // Declare constants
+        private const string _evo_enrollmentstatusreasonLabel__PENDING_INSTALL = "Pending Install";
+        private const string _evo_enrollmentstatusreasonLabel_RENEWAL = "Renewal";
+        private const string _evo_enrollmentstatusreasonLabel_SAMEDAYCANCELLATION = "Same Day Cancellation";
+        private const string _evo_programLabel__SURGE_PROTECTION_PROGRAM = "Surge Protection Program";
+        private const int evo_origincode__ETS_CUSTOMERPORTAL = 30;
+
+
+        //Leap Year Date : 02/29
+        private const int _leapYearMonth = 02;
+        private const int _leapYearDate = 29;
+
+        private DateTime MinimumDate = new DateTime(1900, 1, 1);
+        private DateTime AXMinimumDate = new DateTime(2000, 1, 1);
+
+        public string MerchantID { get; set; }
+        public string MerchantPassword { get; set; }
+        public string ETSPaymentServiceURL { get; set; }
+
+        public ITracingService _tracingSvc;
+
+        public Enrollment()
+            : base(typeof(Enrollment))
+        {
+            base.RegisteredEvents.Add(new Tuple<int, string, string, Action<LocalPluginContext>>(Plugin.PluginStage.PreOperation, Plugin.PluginMessage.Create, Schema.Entity.Enrollment.EntityLogicalName, new Action<LocalPluginContext>(PreCreate)));
+            base.RegisteredEvents.Add(new Tuple<int, string, string, Action<LocalPluginContext>>(Plugin.PluginStage.PostOperation, Plugin.PluginMessage.Create, Schema.Entity.Enrollment.EntityLogicalName, new Action<LocalPluginContext>(PostCreate)));
+            base.RegisteredEvents.Add(new Tuple<int, string, string, Action<LocalPluginContext>>(Plugin.PluginStage.PreOperation, Plugin.PluginMessage.Update, Schema.Entity.Enrollment.EntityLogicalName, new Action<LocalPluginContext>(PreUpdate)));
+            base.RegisteredEvents.Add(new Tuple<int, string, string, Action<LocalPluginContext>>(Plugin.PluginStage.PostOperation, Plugin.PluginMessage.Update, Schema.Entity.Enrollment.EntityLogicalName, new Action<LocalPluginContext>(PostUpdate)));
+        }
+
+        public IOrganizationService InitFromContext(LocalPluginContext localContext, out evo_enrollment targetEnrollment, out evo_enrollment preImageEnrollment)
+        {
+            if (localContext == null)
+            {
+                throw new ArgumentNullException("localContext");
+            }
+
+            IPluginExecutionContext pluginContext = localContext.PluginExecutionContext;
+            IOrganizationService service = localContext.OrganizationService;
+            _tracingSvc = (ITracingService)localContext.TracingService;
+
+            if (localContext == null)
+                throw new Exception("No plugin context present");
+
+            if (!(pluginContext.InputParameters["Target"] is Entity))
+                throw new Exception(string.Format("The context record is not the [{0}] entity as expected, exiting", evo_enrollment.EntityLogicalName));
+
+            Entity Entitytarget = (Entity)pluginContext.InputParameters["Target"];
+            _tracingSvc.Trace("Checked Target is of Type Entity");
+
+            if (Entitytarget == null || Entitytarget.LogicalName != evo_enrollment.EntityLogicalName)
+                throw new Exception(string.Format("The context record is not the [{0}] entity as expected, exiting", evo_enrollment.EntityLogicalName));
+
+            targetEnrollment = Entitytarget.ToEntity<evo_enrollment>();
+            preImageEnrollment = pluginContext.PreEntityImages.Count > 0 ? pluginContext.PreEntityImages.Values.FirstOrDefault().ToEntity<evo_enrollment>() : null;
+            return service;
+        }
+
+        #region Event Trigger Methods
+        /// <summary>
+        /// Event handler for PreCreate event of enrollment plugin.
+        /// </summary>
+        /// <param name="localContext"></param>
+        public void PreCreate(LocalPluginContext localContext)
+        {
+            evo_enrollment targetEnrollment;
+            evo_enrollment preImageEnrollment;
+            IOrganizationService service = InitFromContext(localContext, out targetEnrollment, out preImageEnrollment);                     
+
+            ValidateDuplicateEnrollment(service, targetEnrollment, preImageEnrollment);
+            LockBoxAssignParentEnrollment(service, targetEnrollment);//Added for 29345 Lockbox. Assigning the parent enrollmentId for duplicate lockbox records.
+            //Workflow replaced methods
+
+            MapMonthlyAnnualPriceFromMarketingCode(service, targetEnrollment, preImageEnrollment);
+            MapCustomerDelinquency(service, targetEnrollment);
+            MapDiagnosticPeriodFromOwningUser(service, targetEnrollment);
+            MapOrderTakenBy(service, targetEnrollment);
+            MapEnrollmentNumber(service, targetEnrollment);
+            MapSurgeYear(service, targetEnrollment);
+
+            PopulateDatesOnEnrollment(service, targetEnrollment, preImageEnrollment);
+            PopulateCreditAmount(localContext, service, targetEnrollment);
+            PopulateCCHTax(localContext, service, targetEnrollment, preImageEnrollment);
+            CopyPolicyNumber(localContext, service, targetEnrollment);
+            MapAutoRenewFromPaymentMethod(service, targetEnrollment);
+            PopulateConfirmationLetterSent(service, targetEnrollment, preImageEnrollment);
+        }
+
+        public void PostCreate(LocalPluginContext localContext)
+        {
+            if (localContext == null)
+            {
+                throw new ArgumentNullException("localContext");
+            }
+        }
+
+        public void PreUpdate(LocalPluginContext localContext)
+        {
+            evo_enrollment targetEnrollment;
+            evo_enrollment preImageEnrollment;
+            IOrganizationService service = InitFromContext(localContext, out targetEnrollment, out preImageEnrollment);
+
+            if (localContext.PluginExecutionContext.Depth <= 1)
+            {                
+                ValidateDuplicateEnrollment(service, targetEnrollment, preImageEnrollment);
+                //Workflow replaced methods.
+                MapMonthlyAnnualPriceFromMarketingCode(service,targetEnrollment, preImageEnrollment);
+
+                PopulateDatesOnEnrollment(service, targetEnrollment,  preImageEnrollment);
+                PopulateCCHTax(localContext, service, targetEnrollment, preImageEnrollment);
+                PopulateConfirmationLetterSent(service, targetEnrollment, preImageEnrollment);
+                ClearOutCancellationFields(service, targetEnrollment, preImageEnrollment); //29605
+            }
+        }
+
+        public void PostUpdate(LocalPluginContext localContext)
+        {
+            evo_enrollment targetEnrollment;
+            evo_enrollment preImageEnrollment;
+            IOrganizationService service = InitFromContext(localContext, out targetEnrollment, out preImageEnrollment);
+
+            if (localContext == null)
+                throw new ArgumentNullException("localContext");
+
+            // Get plugin execution object
+            IPluginExecutionContext pluginContext = localContext.PluginExecutionContext;
+
+            if (_tracingSvc == null)
+                throw new InvalidPluginExecutionException("Failed to retrieve the tracing service.");
+
+            _tracingSvc.Trace("Start of Update Plugin to BulkCancellation");
+
+            /// Since it is PostUpdate, check plugin context depth to avoid infinite loop.
+            if (localContext.PluginExecutionContext.Depth >= 2)
+                return;
+
+            if (preImageEnrollment == null)
+                throw new Exception("Plugin step is missing PreImage, contact CRM administrator.");
+
+            // Conditional variables
+            OptionSetValue enrollmentStatus = targetEnrollment.Contains("evo_enrollmentstatus") ? targetEnrollment.evo_EnrollmentStatus : preImageEnrollment.evo_EnrollmentStatus;
+
+            if (enrollmentStatus != null && enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Cancelled)
+            {
+                if (targetEnrollment.Contains("evo_scribecancellation"))
+                {
+                    #region SCRIBE PROCESSING
+                    // Only process if there is a changes found to evo_scribecancellation attribute.
+                    // ETS refunds will also be processed if applicable.
+                    if (!IsRequestRefundCompleted(service,targetEnrollment))
+                    {
+                        var refundedAmount = BulkCancellation(localContext, service, targetEnrollment, preImageEnrollment);
+                    }
+                    #endregion
+                }
+                else
+                {
+                    // Normal Cancellation Business Logic
+                    // REFUNDS ONLY ALLOWED VIA RIBBON -- CancelRecurringPayment(localContext);
+                }
+            }
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Checks enrollment date and populate eligiblity date by adding 30 days to enrollment date.
+        /// </summary>
+        /// <param name="localContext"></param>
+        public void PopulateDatesOnEnrollment(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            // Declare relavent entity properties for the function
+            DateTime? eligibleDate = null;
+            DateTime? endDate = null;
+            DateTime? enrollmentDate = null;
+            EntityReference enrollmentStatusReasonRef = null;
+            EntityReference peenrollmentRef = null;
+            EntityReference locationcodeRef = null;
+
+            evo_enrollmentstatusreason enrollmentStatusReasonEntity = null;
+            // Declare computed values
+            DateTime? calculatedEnrollmentDate = null;
+            DateTime? calculatedEligibleDate = null;
+            DateTime? calculatedEndDate = null;
+
+            try
+            {
+                _tracingSvc.Trace("Starting enrollment date calculations");
+
+                if (preImageEnrollment != null)
+                {
+                    // instantiate with preImage if possible first.
+                    eligibleDate = preImageEnrollment.evo_EligibleDate;
+                    endDate = preImageEnrollment.evo_EndDate;
+                    enrollmentStatusReasonRef = preImageEnrollment.evo_enrollmentstatreasonid;
+                    peenrollmentRef = preImageEnrollment.evo_peenrollmentid;
+                    enrollmentDate = preImageEnrollment.evo_EnrollmentDate;
+                    locationcodeRef = preImageEnrollment.evo_locationcodeid; //Changed field name.
+                }
+
+                // overwrite with any updated fields.
+                if (targetEnrollment.Contains("evo_eligibledate"))
+                    eligibleDate = targetEnrollment.evo_EligibleDate;
+                if (targetEnrollment.Contains("evo_enddate"))
+                    endDate = targetEnrollment.evo_EndDate;
+                if (targetEnrollment.Contains("evo_enrollmentstatreasonid"))
+                    enrollmentStatusReasonRef = targetEnrollment.evo_enrollmentstatreasonid;
+                if (targetEnrollment.Contains("evo_peenrollmentid"))
+                    peenrollmentRef = targetEnrollment.evo_peenrollmentid;
+                if (targetEnrollment.Contains("evo_enrollmentdate"))
+                    enrollmentDate = targetEnrollment.evo_EnrollmentDate;
+                if (targetEnrollment.Contains("evo_locationcodeid"))
+                    locationcodeRef = targetEnrollment.evo_locationcodeid;
+
+                _tracingSvc.Trace("eligibleDate: {0}, endDate: {1}, enrollmentStatusReasonRef: {2}, peenrollmentRef: {3}, enrollmentDate: {4}, locationcodeRef: {5}",
+                    eligibleDate,
+                    endDate,
+                    enrollmentStatusReasonRef != null ? (Guid?)enrollmentStatusReasonRef.Id : null,
+                    peenrollmentRef != null ? (Guid?)peenrollmentRef.Id : null,
+                    enrollmentDate,
+                    locationcodeRef != null ? (Guid?)locationcodeRef.Id : null);
+
+                // If Eligible and End dates are entered from UI, no need to execute plugin
+                if (eligibleDate != null && endDate != null)
+                {
+                    _tracingSvc.Trace("Eligible Date and End Dates are calculated in JS so calculation is NOT required from plugin.");
+                    return;
+                }
+
+                if (enrollmentStatusReasonRef != null && enrollmentStatusReasonRef.Id != Guid.Empty)
+                    enrollmentStatusReasonEntity = service.Retrieve(enrollmentStatusReasonRef.LogicalName, enrollmentStatusReasonRef.Id, new ColumnSet("evo_name")).ToEntity<evo_enrollmentstatusreason>();
+
+                if (enrollmentStatusReasonEntity == null)
+                {
+                    _tracingSvc.Trace("enrollment status is null date calculations are skipped.");
+                    return;
+                }
+
+                // If Enrollment is Draft or Program is Surge Protection Program or Enrollment Status reason is Pending Install --- No Calculation of Dates is required
+                if (!string.IsNullOrEmpty(enrollmentStatusReasonEntity.evo_name) && IsPendingInstallSurgeProtectionProgram(enrollmentStatusReasonEntity.evo_name, service, targetEnrollment, preImageEnrollment))
+                {
+                    _tracingSvc.Trace("No Calculation of Dates is required from plugin if Enrollment Status is Draft or Program is Surge Protection Program or Enrollment Status reason is Pending Install");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking if Enrollment is Renewal or not. Calculation of Dates will be different for Renewal and New Enrollment");
+
+                if (peenrollmentRef != null && !string.IsNullOrEmpty(enrollmentStatusReasonEntity.evo_name) && enrollmentStatusReasonEntity.evo_name.ToLower() == _evo_enrollmentstatusreasonLabel_RENEWAL.ToLower())
+                {
+                    _tracingSvc.Trace("Calculation according to the Renewal Enrollment");
+                    CalculateDatesForRenewalEnrollment(peenrollmentRef, enrollmentDate, out calculatedEnrollmentDate, out calculatedEligibleDate, out calculatedEndDate, service, targetEnrollment);
+                }
+                else
+                {
+                    _tracingSvc.Trace("Calculation according to New Enrollment");
+                    CalculateDatesForNonRenewal(locationcodeRef, enrollmentDate, out calculatedEnrollmentDate, out calculatedEligibleDate, out calculatedEndDate, service, targetEnrollment);
+                }
+
+                targetEnrollment.evo_EnrollmentDate = calculatedEnrollmentDate != null ? (DateTime?)calculatedEnrollmentDate.Value.ToUniversalTime() : null;
+                targetEnrollment.evo_EligibleDate = calculatedEligibleDate != null ? (DateTime?)calculatedEligibleDate.Value.ToUniversalTime() : null;
+                targetEnrollment.evo_EndDate = calculatedEndDate != null ? (DateTime?)calculatedEndDate.Value.ToUniversalTime() : null;
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateEligiblityDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_PopulateEligiblityDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+
+        }
+
+        /// <summary>
+        /// This method is used to calculate the dates if enrollment is NEW and NOT Renewal 
+        /// </summary>
+        /// <param name="locationCodeRef"></param>
+        /// <param name="parentEnrollmentDate"></param>
+        /// <param name="calculatedEnrollmentDate"></param>
+        /// <param name="calculatedEligibleDate"></param>
+        /// <param name="calculatedEndDate"></param>
+        public void CalculateDatesForNonRenewal(EntityReference locationCodeRef, DateTime? parentEnrollmentDate,
+            out DateTime? calculatedEnrollmentDate,
+            out DateTime? calculatedEligibleDate,
+            out DateTime? calculatedEndDate, IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+
+            calculatedEnrollmentDate = null;
+            calculatedEligibleDate = null;
+            calculatedEndDate = null;
+            bool isTnCException = false;
+
+            // Do nothing if enrollmentDate is null
+            if (parentEnrollmentDate == null)
+                return;
+
+            calculatedEnrollmentDate = parentEnrollmentDate.Value;
+            calculatedEligibleDate = calculatedEnrollmentDate.Value.AddDays(30);
+
+            // Get Location Entity T&CExceptions field check if it is 'Yes & No'.
+            if (locationCodeRef != null)
+            {
+                _tracingSvc.Trace("Get T&CExceptions field value from Location Entity. Fetched location id value is : [{0}]", locationCodeRef.Id);
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var locationCodeRecord = svc.evo_locationcodeSet
+                        .Where(x => x.Id == locationCodeRef.Id)
+                        .Select(x => new evo_locationcode
+                        {
+                            Id = x.evo_locationcodeId.Value,
+                            evo_TnCExceptions = x.evo_TnCExceptions
+                        }).FirstOrDefault();
+
+                    if (locationCodeRecord != null)
+                        isTnCException = locationCodeRecord.evo_TnCExceptions != null ? (bool)locationCodeRecord.evo_TnCExceptions : false;
+                }
+            }
+
+            _tracingSvc.Trace("Check condition TnCException = True and if Eligible Date or End Date is leap year and calculation is done accordingly. ");
+            calculatedEndDate = EndDateCalculationFromEligibleDateAndTnCFlag(calculatedEligibleDate, isTnCException, service, targetEnrollment);
+        }
+
+        /// <summary>
+        ///  This method is used to calculate the dates if enrollment is Renewal 
+        /// </summary>
+        /// <param name="parentEnrollmentRef"></param>
+        /// <param name="parentEnrollmentDate"></param>
+        /// <param name="renewedEnrollmentDate"></param>
+        /// <param name="renewedEligibleDate"></param>
+        /// <param name="renewedEndDate"></param>
+        public void CalculateDatesForRenewalEnrollment(EntityReference parentEnrollmentRef, DateTime? parentEnrollmentDate, out DateTime? renewedEnrollmentDate, out DateTime? renewedEligibleDate, out DateTime? renewedEndDate, IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            _tracingSvc.Trace("Start method execution: CalculateDatesForRenewal");
+
+            if (parentEnrollmentRef == null)
+                throw new Exception("Missing parent enrollment reference.");
+
+            if (parentEnrollmentDate == null)
+                throw new Exception("Missing parent enrollment date value.");
+
+            // Retrieve Parent Enrollment date according to ParentEnrollment ID.
+            evo_enrollment parentEnrollment = service.Retrieve(evo_enrollment.EntityLogicalName, parentEnrollmentRef.Id, new ColumnSet(Schema.Entity.Enrollment.Attributes.evo_enddate)).ToEntity<evo_enrollment>();
+
+            if (parentEnrollment.evo_EndDate == null)
+                throw new Exception("The end date for the parent enrollment is null.");
+
+            // Enrollment Date  = Parent Enrollment Date + 1
+            renewedEnrollmentDate = parentEnrollment.evo_EndDate.Value.AddDays(1);
+            // Elgible Date  =  Parent Enrollment Date + 1
+            renewedEligibleDate = renewedEnrollmentDate;
+
+            // Checking both Eligible Date and End Date and if any Date is a leap Year then add 365 days otherwise add 364 Days
+            // Sending default true as no need to check TnC flag in case of New Enrollment and calculation is based on 364/365 Days and NOT 334/335  days
+            renewedEndDate = EndDateCalculationFromEligibleDateAndTnCFlag(renewedEligibleDate, true, service, targetEnrollment);
+
+            _tracingSvc.Trace("Renewed enrollment- Enrollment Date : {0}, End date : {1}, Eligible Date : {2}", renewedEndDate, renewedEndDate, renewedEligibleDate);
+        }
+
+        /// <summary>
+        /// This method validates that EligibleDate and EndDate is leap year or Not and calculate and returns the end date accordingly.
+        /// </summary>
+        /// <param name="eligibleDate"></param>
+        /// <param name="isTnCFlag"></param>
+        /// <returns></returns>
+        public DateTime EndDateCalculationFromEligibleDateAndTnCFlag(DateTime? eligibleDate, bool isTnCFlag, IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            _tracingSvc.Trace("Calculating end date...");
+
+            DateTime? resultEndDate = null;
+            DateTime? tempLeapYearDate = null;
+            int eligibleYear;
+            int endDateYear;
+
+            if (eligibleDate == null)
+                throw new Exception("Can't Calculate without a supplied eligible date parameter.");
+
+            if (isTnCFlag)
+            {
+                resultEndDate = eligibleDate.Value.AddDays(364);
+                eligibleYear = eligibleDate.Value.Year;
+                endDateYear = resultEndDate.Value.Year;
+
+            }
+            else
+            {
+                resultEndDate = eligibleDate.Value.AddDays(334);
+                eligibleYear = eligibleDate.Value.Year;
+                endDateYear = resultEndDate.Value.Year;
+
+            }
+
+            //First Check whether Eligible Date is Leap Year and if it is before 29/02 then add 1 Day to End Date i.e. End Date = Eligble Date + 365 OR +335 (according to criteria of TnC flag)
+            //If Eligible Date is not Leap Year then Check whether End Date is Leap Year after adding 364 Daya and if comes after 29/02 then add 1 Day to End Date i.e. End Date = Eligble Date + 365 or +335 (according to criteria of TnC flag)
+            // Otherwise End Date  = Eligible Date + 364
+            tempLeapYearDate = DateTime.IsLeapYear(eligibleYear) ? new DateTime(eligibleYear, _leapYearMonth, _leapYearDate) :
+                ((DateTime.IsLeapYear(endDateYear) ? new DateTime(endDateYear, _leapYearMonth, _leapYearDate) :
+                Convert.ToDateTime(null)));
+
+            if (tempLeapYearDate != null)
+            {
+                if ((tempLeapYearDate.Value.Year == eligibleYear && eligibleDate < tempLeapYearDate) || (tempLeapYearDate.Value.Year == endDateYear && resultEndDate >= tempLeapYearDate))
+                {
+                    resultEndDate = resultEndDate.Value.AddDays(1);
+                }
+            }
+            return resultEndDate.Value;
+        }
+
+        /// <summary>
+        /// This method validates that If Enrollment is Draft or Program is Surge Protection Program
+        /// or Enrollment Status reason is Pending Install and if it is so, returns true
+        /// </summary>
+        /// <param name="enrollmentStatusReasonName"></param>
+        /// <returns></returns>
+        private bool IsPendingInstallSurgeProtectionProgram(string enrollmentStatusReasonName, IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            _tracingSvc.Trace("IsPendingInstallSurgeProtectionProgram started");
+
+            // Declare key variables
+            int? enrollmentStatusValue = null;
+            EntityReference programRef = null;
+            evo_program relatedProgram = null;
+
+            // Initialize with PreImage variables.
+            if (preImageEnrollment != null)
+            {
+                enrollmentStatusValue = preImageEnrollment.evo_EnrollmentStatus != null ? (int?)preImageEnrollment.evo_EnrollmentStatus.Value : null;
+                programRef = preImageEnrollment.evo_programid;
+            }
+
+            // Overwrite with updated values from context target (if any).
+            if (targetEnrollment.Contains("evo_enrollmentstatus"))
+                enrollmentStatusValue = targetEnrollment.evo_EnrollmentStatus != null ? (int?)targetEnrollment.evo_EnrollmentStatus.Value : null;
+            if (targetEnrollment.Contains("evo_programid"))
+                programRef = targetEnrollment.evo_programid;
+
+            if (programRef != null && programRef.Id != Guid.Empty)
+                relatedProgram = service.Retrieve(programRef.LogicalName, programRef.Id, new ColumnSet("evo_name")).ToEntity<evo_program>();
+
+            // Check if the related status is set
+            if (enrollmentStatusValue == null)
+                return false;
+
+            // Check if the related program is set to Surge Protection Program
+            if (programRef == null)
+                return false;
+
+            // Check if the status is Draft 
+            if (enrollmentStatusValue != (int)OptionSets.evo_enrollmentstatus.Draft)
+                return false;
+
+            // Check if the Enrollment Status Reason is Pending Install
+            if (enrollmentStatusReasonName.ToLower() != _evo_enrollmentstatusreasonLabel__PENDING_INSTALL.ToLower())
+                return false;
+
+            // Check if the Program is Surge Protection Program
+            if (relatedProgram != null && !string.IsNullOrEmpty(relatedProgram.evo_name) && relatedProgram.evo_name != _evo_programLabel__SURGE_PROTECTION_PROGRAM)
+                return false;
+
+            _tracingSvc.Trace("IsPendingInstallSurgeProtectionProgram finished.");
+            return true;
+        }
+
+        /// <summary>
+        /// Method is used to calculate CCH tax by calling STO web service
+        /// </summary>Schema
+        /// <param name="localContext"></param>
+        public void PopulateCCHTax(LocalPluginContext localContext, IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+
+            Money tax = new Money(0.0M);
+            Money total = new Money(0.0M);
+
+
+            EntityReference contact = null;
+            EntityReference locationCodeRef = null;
+            EntityReference programRef = null;
+            int? originCode = null;
+            OptionSetValue enrollmentStatus = null;
+            OptionSetValue paymentMethod = null;
+            Money subTotal = new Money(0.0M);
+            Contact contactInfo = null;
+            string programCode = string.Empty;
+            string locationCode = string.Empty;
+            string enrollmentStatusReasonName = string.Empty;
+            bool isSubTotalNegative = false;
+
+
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                // If tax is calculated from UI then no need to execute further
+                _tracingSvc.Trace("Checking tax value.");
+                if (targetEnrollment.Contains("evo_tax") && targetEnrollment.evo_Tax != null && targetEnrollment.evo_Tax.Value != 0.0M)
+                {
+                    _tracingSvc.Trace("Tax already calculated from UI through action.");
+                    return;
+                }
+
+                // Check if Scribe Cancellation and Cancellation Date contains data or dates then return it.
+                _tracingSvc.Trace("Checking Scribe Cancellation and Cancellation Date contains data or dates.");
+                if (targetEnrollment.Contains("evo_scribecancellation") && targetEnrollment.evo_ScribeCancellation != null
+                        && targetEnrollment.Contains("evo_cancellationdate") && targetEnrollment.evo_CancellationDate != null)
+                {
+                    _tracingSvc.Trace("Found Scribe Cancellation and Cancellation Date then return it.");
+                    return;
+                }
+
+                /*// Check if CancellationSent and EnrollmentSent contains data or dates then return it. - Defect 29452
+                _tracingSvc.Trace("Checking CancellationSent and EnrollmentSent contains data or dates.");
+                if (targetEnrollment.Contains("evo_cancellationsent") && targetEnrollment.evo_CancellationSent != null
+                       || targetEnrollment.Contains("evo_enrollmentsent") && targetEnrollment.evo_EnrollmentSent != null)
+                {
+                    _tracingSvc.Trace("Found CancellationSent and EnrollmentSent then return it.");
+                    return;
+                }*/
+
+                //Getting values from Pre-Image
+                _tracingSvc.Trace("Checking Pre-Image values.");
+                if (preImageEnrollment != null)
+                {
+                    contact = preImageEnrollment.evo_contactid;
+                    locationCodeRef = preImageEnrollment.evo_locationcodeid;
+                    originCode = preImageEnrollment.evo_OriginCode;
+                    enrollmentStatus = preImageEnrollment.evo_EnrollmentStatus;
+                    paymentMethod = preImageEnrollment.evo_PaymentMethod;
+                    subTotal = preImageEnrollment.evo_Subtotal;
+                    programRef = preImageEnrollment.evo_programid;
+                }
+
+                //Overriding with context
+                _tracingSvc.Trace("Checking evo_contactid.");
+                if (targetEnrollment.Contains("evo_contactid"))
+                    contact = targetEnrollment.evo_contactid;
+
+                _tracingSvc.Trace("Checking evo_locationcodeid.");
+                if (targetEnrollment.Contains("evo_locationcodeid"))
+                    locationCodeRef = targetEnrollment.evo_locationcodeid;
+
+                _tracingSvc.Trace("Checking evo_origincode.");
+                if (targetEnrollment.Contains("evo_origincode"))
+                    originCode = targetEnrollment.evo_OriginCode;
+
+                _tracingSvc.Trace("Checking evo_enrollmentstatus.");
+                if (targetEnrollment.Contains("evo_enrollmentstatus"))
+                    enrollmentStatus = targetEnrollment.evo_EnrollmentStatus;
+
+                _tracingSvc.Trace("Checking evo_paymentmethod.");
+                if (targetEnrollment.Contains("evo_paymentmethod"))
+                    paymentMethod = targetEnrollment.evo_PaymentMethod;
+
+                _tracingSvc.Trace("Checking evo_subtotal.");
+                if (targetEnrollment.Contains("evo_subtotal"))
+                    subTotal = targetEnrollment.evo_Subtotal;
+
+                _tracingSvc.Trace("Checking evo_programid.");
+                if (targetEnrollment.Contains("evo_programid"))
+                    programRef = targetEnrollment.evo_programid;
+
+                _tracingSvc.Trace("Checking if update is not coming from CRM.");
+                if (targetEnrollment.Contains("evo_integrationrecordsource") && targetEnrollment.evo_integrationrecordsource != null &&
+                    targetEnrollment.evo_integrationrecordsource.Value > 1)
+                        return;
+
+                _tracingSvc.Trace("Checking localContext.PluginExecutionContext.MessageName == Create.");
+                if (localContext.PluginExecutionContext.MessageName == "Create")
+                {
+                    // If enrollment is CREATED through the ETS custom portal, then tax will not be calculated within the plugin.
+                    // ETS is responsible in providing us with the tax values.
+                    if (originCode != null && (int)originCode == evo_origincode__ETS_CUSTOMERPORTAL)
+                    {
+                        _tracingSvc.Trace("Entity name [{0}] was created from ETS custom portal, bypassing tax calculations.");
+                        return;
+                    }
+                }
+
+                _tracingSvc.Trace("Checking contact");
+                if (contact == null)
+                {
+                    _tracingSvc.Trace("Contact for enrollment is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking locationCodeRef");
+                if (locationCodeRef == null)
+                {
+                    _tracingSvc.Trace("Location code for enrollment is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking enrollmentStatus");
+                if (enrollmentStatus == null)
+                {
+                    _tracingSvc.Trace("Enrollment Status for enrollment is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking paymentMethod");
+                if (paymentMethod == null)
+                {
+                    _tracingSvc.Trace("Payment method for enrollment is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking programRef");
+                if (programRef == null)
+                {
+                    _tracingSvc.Trace("Program for enrollment is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Checking enrollmentStatus.Value");
+                if (enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.ProblemEnrollment ||
+                    enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Cancelled ||
+                    enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.CancellationFailure ||
+                    enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.EnrollmentFailure ||
+                    enrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Closed)
+                {
+                    _tracingSvc.Trace("Enrollment is Problem or Failure or Cancelled enrollment, bypassing tax calculations.");
+                    return;
+                }
+
+                // If Sub total is negative, set flag to true.
+                _tracingSvc.Trace("Checking subTotal");
+                if (subTotal == null)
+                    return;
+
+                if (subTotal.Value < 0)
+                    isSubTotalNegative = true;
+
+                _tracingSvc.Trace("Retrieving Customer's Address and Customer Type code");
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+
+                    // Retrieving Customer's Address and Customer Type code
+                    contactInfo = svc.ContactSet
+                                  .Where(con => con.ContactId.Value == contact.Id)
+                                  .Select(con => new Contact
+                                  {
+                                      CustomerTypeCode = con.CustomerTypeCode,
+                                      Address1_Line1 = con.Address1_Line1,
+                                      Address1_Line2 = con.Address1_Line2,
+                                      Address1_City = con.Address1_City,
+                                      evo_ServiceZipPostalCode = con.evo_ServiceZipPostalCode,
+                                      evo_servicestateid = con.evo_servicestateid
+                                  }).FirstOrDefault();
+
+                    if (contactInfo == null)
+                    {
+                        _tracingSvc.Trace("Issue in retrieving Customer's information using LINQ.");
+                        return;
+                    }
+
+                    if (contactInfo.CustomerTypeCode == null)
+                    {
+                        _tracingSvc.Trace("Customer Type code is not associated with the customer.");
+                        return;
+                    }
+
+                    if (contactInfo.CustomerTypeCode.Value != (int)OptionSets.ContactCustomerTypeCode.ResidentialCustomer && contactInfo.CustomerTypeCode.Value != (int)OptionSets.ContactCustomerTypeCode.CommercialCustomer)
+                    {
+                        _tracingSvc.Trace("Customer Type code is neither Residential nor Commercial.");
+                        return;
+                    }
+
+                    //Retrieving Program Code from Program
+                    _tracingSvc.Trace("Retrieving Program Code from Program");
+                    var programInfo = (from prg in svc.evo_programSet
+                                       where prg.evo_programId.Value == programRef.Id
+                                       select new
+                                       {
+                                           evo_programcode = prg.evo_programcode
+
+                                       }).FirstOrDefault();
+
+                    _tracingSvc.Trace("Checking ProgramInfo");
+                    if (programInfo == null)
+                    {
+                        _tracingSvc.Trace("Issue in retrieving code for Program.");
+                        return;
+                    }
+
+                    _tracingSvc.Trace("programInfo.evo_programcode");
+                    if (string.IsNullOrEmpty(programInfo.evo_programcode))
+                    {
+                        _tracingSvc.Trace("Program does not have Program Code associated with it.");
+                        return;
+                    }
+                    programCode = programInfo.evo_programcode;
+
+
+                    //Retrieving Code from Location Code
+                    _tracingSvc.Trace("Retrieving Code from Location Code");
+                    var locationCodeInfo = (from loc in svc.evo_locationcodeSet
+                                            where loc.evo_locationcodeId.Value == locationCodeRef.Id
+                                            select new
+                                            {
+                                                evo_Code = loc.evo_Code
+
+                                            }).FirstOrDefault();
+
+                    if (locationCodeInfo == null)
+                    {
+                        _tracingSvc.Trace("Issue in retrieving code for Location Code.");
+                        return;
+                    }
+
+                    if (string.IsNullOrEmpty(locationCodeInfo.evo_Code))
+                    {
+                        _tracingSvc.Trace("Location Code does not have Code associated with it.");
+                        return;
+                    }
+
+                    _tracingSvc.Trace("Calls GetEnrollmentStatusReasonName function");
+                    enrollmentStatusReasonName = GetEnrollmentStatusReasonName(service, targetEnrollment, preImageEnrollment);
+
+                    //Handles enrollments with Same Day Cancellation Enrollment Status
+                    _tracingSvc.Trace("Handles enrollments with Same Day Cancellation Enrollment Status.");
+                    if (!string.IsNullOrEmpty(enrollmentStatusReasonName) && enrollmentStatusReasonName == _evo_enrollmentstatusreasonLabel_SAMEDAYCANCELLATION)
+                    {
+                        _tracingSvc.Trace("No tax calculation for Same Day Cancellation.");
+                        return;
+                    }
+
+                    locationCode = locationCodeInfo.evo_Code;
+                }
+
+                _tracingSvc.Trace("Retrieve Customer Type.");
+                OptionSets.ContactCustomerTypeCode customerTypeCode = (OptionSets.ContactCustomerTypeCode)contactInfo.CustomerTypeCode.Value;
+
+                _tracingSvc.Trace("Initializing CCH Address object ");
+                //CCH Address object
+                CCHService.Address objShipToAddress = new CCHService.Address();
+                objShipToAddress.Line1 = contactInfo.Address1_Line1;
+                objShipToAddress.Line2 = !string.IsNullOrEmpty(contactInfo.Address1_Line2) ? contactInfo.Address1_Line2 : string.Empty;
+                objShipToAddress.City = contactInfo.Address1_City;
+                objShipToAddress.County = string.Empty; //Optional
+                objShipToAddress.PostalCode = contactInfo.evo_ServiceZipPostalCode != null ? contactInfo.evo_ServiceZipPostalCode.Name : string.Empty;
+                objShipToAddress.StateOrProvince = contactInfo.evo_servicestateid != null ? ((OptionSets.evo_state)contactInfo.evo_servicestateid.Value).ToString() : string.Empty;
+                objShipToAddress.CountryCode = COUNTRY_USA;
+
+                // If Sub total is negative, then we have to convert it into positive and send to CCH for tax calculation.
+                _tracingSvc.Trace("Check if subtotal is negative");
+                if (isSubTotalNegative)
+                    subTotal.Value = subTotal.Value * -1;
+
+                //Calculating tax
+                _tracingSvc.Trace("Call AX Tax method");
+                tax = CalculateTaxHelper.CalculateTax(localContext.CCHEndpointAddrress, objShipToAddress, programCode, paymentMethod.Value, customerTypeCode.ToString(), locationCode, Convert.ToDecimal(subTotal.Value));
+                _tracingSvc.Trace("Tax calculated from CCH : {0}", tax.Value.ToString());
+
+                // Converting tax value in negative if amount for which tax is calculated is negative .
+                _tracingSvc.Trace("Converting tax value in negative if amount for which tax is calculated is negative.");
+                if (isSubTotalNegative)
+                {
+                    subTotal.Value = subTotal.Value * -1;
+                    tax.Value = tax.Value * -1;
+                }
+
+                //Calculating Total
+                _tracingSvc.Trace("Calculating Total");
+                total.Value = tax.Value + subTotal.Value;
+
+                // Assigning values to Tax and Total fields
+                _tracingSvc.Trace("Assigning values to Tax and Total fields");
+                targetEnrollment.evo_Tax = tax;
+                targetEnrollment.evo_Total = total;
+
+            }
+
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateCCHTax, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception ex)
+            {
+                PluginErrorHandler.ShowBusinessProcessError("Failed to retrieve tax information from CCH. Please try later or contact administrator with error code: " + ErrorCodes.Enrollment_PopulateCCHTax_ServiceNotReachable
+                    + System.Environment.NewLine + ex.Message);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+        }
+
+        /// <summary>
+        /// Populate credit amount on new enrollment if enrollment status is Reenrolled
+        /// </summary>
+        /// <param name="localContext"></param>
+        public void PopulateCreditAmount(LocalPluginContext localContext, IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            // Get plugin execution object
+            IPluginExecutionContext pluginContext = localContext.PluginExecutionContext;
+
+            // Check if input parameters contain Target
+            if (pluginContext.InputParameters.Contains("Target") && pluginContext.InputParameters["Target"] is Entity)
+            {
+                Entity entity = (Entity)pluginContext.InputParameters["Target"];
+
+                if (entity.LogicalName != Schema.Entity.Enrollment.EntityLogicalName)
+                    return;
+
+                try
+                {
+                    // Only populate if enrollment status is Reenroll
+                    if (entity.Attributes.Contains(Schema.Entity.Enrollment.Attributes.evo_enrollmentstatus) && entity.Attributes[Schema.Entity.Enrollment.Attributes.evo_enrollmentstatus] != null)
+                    {
+                        // Only proceed if Enrollment Status = Re-enroll
+                        if (((OptionSetValue)entity.Attributes[Schema.Entity.Enrollment.Attributes.evo_enrollmentstatus]).Value == ENROLLMENT_STATUS_REENROLL)
+                        {
+                            // Retrieve all associated adjustment for the parent enrollment
+                            if (entity.Attributes.Contains(Schema.Entity.Enrollment.Attributes.evo_peenrollmentid) && entity.Attributes[Schema.Entity.Enrollment.Attributes.evo_peenrollmentid] != null)
+                            {
+                                decimal totalCreditAmount = 0.0M;
+
+                                Guid parentEnrollmentId = ((EntityReference)entity.Attributes[Schema.Entity.Enrollment.Attributes.evo_peenrollmentid]).Id;
+                                EntityCollection adjustments = RetrieveAdjustmentsAssociatedToEnrollment(localContext.OrganizationService, parentEnrollmentId, targetEnrollment);
+
+                                // If adjustments are returned
+                                if (adjustments.Entities.Count > 0)
+                                {
+                                    foreach (Entity adjustment in adjustments.Entities)
+                                    {
+                                        if (adjustment.Attributes.Contains(Schema.Entity.Adjustment.Attributes.evo_adjustmentrefundamount) && adjustment.Attributes[Schema.Entity.Adjustment.Attributes.evo_adjustmentrefundamount] != null)
+                                        {
+                                            totalCreditAmount += ((Money)adjustment.Attributes[Schema.Entity.Adjustment.Attributes.evo_adjustmentrefundamount]).Value;
+                                        }
+                                    }
+
+                                    // Set credit amount on the new enrollment
+                                    entity.Attributes[Schema.Entity.Enrollment.Attributes.evo_creditamount] = new Money(totalCreditAmount);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (InvalidPluginExecutionException invalidPluginExecutionException)
+                {
+                    throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateCreditAmount, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+                }
+                catch (Exception exception)
+                {
+                    throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_PopulateCreditAmount, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+                }
+            }
+
+        }
+
+        /// <summary>
+        /// Retrieve adjustments associated to the enrollment with credit amount populated for each adjustment
+        /// </summary>
+        /// <param name="service"></param>
+        /// <param name="enrollmentId"></param>
+        /// <returns></returns>
+        private EntityCollection RetrieveAdjustmentsAssociatedToEnrollment(IOrganizationService service, Guid enrollmentId, evo_enrollment targetEnrollment)
+        {
+            QueryByAttribute qba = new QueryByAttribute(Schema.Entity.Adjustment.EntityLogicalName)
+            {
+                ColumnSet = new ColumnSet(Schema.Entity.Adjustment.Attributes.evo_adjustmentrefundamount),
+                Attributes = { Schema.Entity.Adjustment.Attributes.evo_enrollmentid },
+                Values = { enrollmentId },
+            };
+
+            EntityCollection adjustments = service.RetrieveMultiple(qba);
+            return adjustments;
+        }
+
+        private void CopyPolicyNumber(LocalPluginContext localContext, IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            // Used as the vessel object for updates to enrollments.
+            string retrievedPolicyNumber = string.Empty;
+            string locationCode = string.Empty;
+
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                if (!targetEnrollment.Contains("evo_contactid") || targetEnrollment.evo_contactid == null)
+                {
+                    _tracingSvc.Trace("Contact is missing in Enrollment");
+                    return;
+                }
+
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+
+                    // Retrieiving Customer's Address and Customer Type code
+                    var locationCodeInfo = (from con in svc.ContactSet
+                                            join loc in svc.evo_locationcodeSet
+                                            on con.evo_locationcodeid.Id equals loc.evo_locationcodeId.Value
+                                            where con.ContactId.Value == targetEnrollment.evo_contactid.Id
+                                            select new
+                                            {
+                                                evo_Code = loc.evo_Code
+
+                                            }).FirstOrDefault();
+
+                    if (locationCodeInfo == null)
+                        return;
+                    if (string.IsNullOrEmpty(locationCodeInfo.evo_Code))
+                    {
+                        _tracingSvc.Trace("Code is not associated with Location Code of the customer.");
+                        return;
+                    }
+                    locationCode = locationCodeInfo.evo_Code;
+
+
+                    _tracingSvc.Trace("Location Code for the customer is {0}.", locationCode);
+
+                    if (locationCode.Equals(LOCATIONCODE_CA100) || locationCode.Equals(LOCATIONCODE_VA100))
+                    {
+                        // If Renew  enrollment then copy the Policy Number of Parent Enrollent
+                        if (targetEnrollment.Contains("evo_peenrollmentid") && targetEnrollment.evo_peenrollmentid != null)
+                        {
+                            _tracingSvc.Trace("Enrollment is renew enrollment. Copying parent enrollment policy number to current enrollment.");
+
+                            evo_enrollment parentEnrollment = svc.evo_enrollmentSet
+                                .Where(enr => enr.evo_enrollmentId.Value == targetEnrollment.evo_peenrollmentid.Id)
+                                .Select(enr => new evo_enrollment
+                                {
+                                    evo_PolicyNumber = enr.evo_PolicyNumber
+                                }).FirstOrDefault();
+
+                            if (parentEnrollment == null || string.IsNullOrEmpty(parentEnrollment.evo_PolicyNumber))
+                                return;
+                            retrievedPolicyNumber = parentEnrollment.evo_PolicyNumber;
+
+                        }
+                        else
+                        {
+                            _tracingSvc.Trace("Enrollment is new enrollment. Copying Enrollment Number to current enrollment.");
+
+                            if (targetEnrollment.Contains("evo_enrollmentnumber") && !string.IsNullOrEmpty(targetEnrollment.evo_EnrollmentNumber))
+                                retrievedPolicyNumber = targetEnrollment.evo_EnrollmentNumber;
+                        }
+                    }
+
+                }
+
+                targetEnrollment.evo_PolicyNumber = retrievedPolicyNumber;
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Claim_CreateSuggestedContractor, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Claim_CreateSuggestedContractor, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// Method is used for bulk cancellation of enrollments
+        /// </summary>
+        /// <param name="localContext"></param>
+        /// <returns></returns>
+        private Money BulkCancellation(LocalPluginContext localContext, IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            string enrollmentStatusReasonName = string.Empty;
+            // Get plugin execution object
+            IPluginExecutionContext pluginContext = localContext.PluginExecutionContext;
+
+            //Get IOrganization Service
+            //IOrganizationService service = localContext.OrganizationService;
+
+            //Extract the tracing service
+            ITracingService tracingService = (ITracingService)localContext.TracingService;
+
+            if (tracingService == null)
+                throw new InvalidPluginExecutionException("Failed to retrieve the tracing service.");
+
+            tracingService.Trace("Start of Update Plugin to BulkCancellation");
+
+            try
+            {
+                tracingService.Trace("Checking if its a bulk cancellation by checking the AX Refund Date field", targetEnrollment.Id);
+                tracingService.Trace("Retrieving Enrollment Status");
+                var enrollmentStatus = targetEnrollment.Contains("evo_enrollmentstatus") ? targetEnrollment.evo_EnrollmentStatus : preImageEnrollment.evo_EnrollmentStatus;
+                var scribeCancellation = targetEnrollment.Contains("evo_scribecancellation") ? targetEnrollment.evo_ScribeCancellation : preImageEnrollment.evo_ScribeCancellation;
+
+                if (enrollmentStatus == null)
+                    return null;
+                if (scribeCancellation == null)
+                    return null;
+
+                enrollmentStatusReasonName = GetEnrollmentStatusReasonName(service, targetEnrollment, preImageEnrollment);
+
+                tracingService.Trace("Calculate Refund by communicating to AX.");
+                EntityReference enrollmentRef = targetEnrollment.ToEntityReference();
+                AXRequestRefund calculateAXRefund = new AXRequestRefund();
+                calculateAXRefund.InitFromPlugin(localContext);
+                Money refundAmount = null;
+                if (enrollmentStatus == null || enrollmentStatus.Value != ((int)OptionSets.evo_enrollmentstatus.Cancelled))
+                {
+                    tracingService.Trace("Enrollment Status is null or not equal to Cancelled");
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(enrollmentStatusReasonName) && enrollmentStatusReasonName == _evo_enrollmentstatusreasonLabel_SAMEDAYCANCELLATION)
+                {
+                    refundAmount = calculateAXRefund.SyncAXRefundAndDatesWithCRM(null);
+                }
+                else
+                {
+                    var contract = calculateAXRefund.CalculateAXRefund();
+                    if (contract != null)
+                        refundAmount = calculateAXRefund.SyncAXRefundAndDatesWithCRM(contract);
+                }
+
+                tracingService.Trace("End of BulkCancellation Method");
+                return refundAmount;
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Bulk_Cancellation, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        private void PopulateConfirmationLetterSent(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            OptionSetValue enrollmentStatus = null;
+            DateTime? confirmationLetterSentDate = null;
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                _tracingSvc.Trace("Checking if update is not coming from CRM.");
+                if (targetEnrollment.Contains("evo_integrationrecordsource") && targetEnrollment.evo_integrationrecordsource != null &&
+                    targetEnrollment.evo_integrationrecordsource.Value > 1)
+                    return;
+
+                if (preImageEnrollment != null)
+                {
+                    enrollmentStatus = preImageEnrollment.evo_EnrollmentStatus;
+                    confirmationLetterSentDate = preImageEnrollment.evo_confirmationlettersentdate;
+                }
+
+                if (targetEnrollment.Contains("evo_enrollmentstatus"))
+                    enrollmentStatus = targetEnrollment.evo_EnrollmentStatus;
+
+                // If Confirmation Letter Send Date contain data, then return
+                if (confirmationLetterSentDate != null && confirmationLetterSentDate.Value != null)
+                {
+                    _tracingSvc.Trace("Enrollment already has value for Confirmation Sent Date.");
+                    return;
+                }
+                // If Enrollment Status is null or Enrollment Status is not Active, then return
+                if (enrollmentStatus == null || enrollmentStatus.Value != (int)OptionSets.evo_enrollmentstatus.Active)
+                {
+                    _tracingSvc.Trace("Enrollment Status is not Active");
+                    return;
+                }
+
+                _tracingSvc.Trace("Calls GetEnrollmentStatusReasonName function");
+                string enrollmentStatusReasonName = GetEnrollmentStatusReasonName(service, targetEnrollment, preImageEnrollment);
+
+                //If enrollment status reason is Same Day Cancellation Enrollment, then return
+                _tracingSvc.Trace("Handles enrollments with Same Day Cancellation Enrollment Status Reason.");
+                if (!string.IsNullOrEmpty(enrollmentStatusReasonName) && enrollmentStatusReasonName == _evo_enrollmentstatusreasonLabel_SAMEDAYCANCELLATION)
+                {
+                    _tracingSvc.Trace("Enrollment Status Reason is Same Day Cancellation.");
+                    return;
+                }
+
+
+                _tracingSvc.Trace("Assign Confirmation Letter Sent Date to current date.");
+                targetEnrollment.evo_confirmationlettersentdate = DateTime.Now;
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateConfirmationLetterDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_PopulateConfirmationLetterDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+        }
+
+        /// <summary>
+        /// This method is used to validate if active enrollment already exists for same customer and product. 
+        /// If yes, then it will not allow the enrollment to save.
+        /// </summary>
+        private void ValidateDuplicateEnrollment(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            EntityReference customerRef = null;
+            EntityReference programRef = null;
+            DateTime? enrollmentDate = null;
+            DateTime? eligibleDate = null;
+            OptionSetValue enrollmentStatus = null;
+            bool isValidEnrollment = true;
+            OptionSetValue paymentMethod = null; //29541
+            OptionSetValue paymentFrequency = null; //29541
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+                
+                if (preImageEnrollment != null)
+                {
+                    // instantiate with preImage if possible first.
+                    customerRef = preImageEnrollment.evo_contactid;
+                    programRef = preImageEnrollment.evo_programid;
+                    enrollmentDate = preImageEnrollment.evo_EnrollmentDate;
+                    eligibleDate = preImageEnrollment.evo_EligibleDate;
+                    enrollmentStatus = preImageEnrollment.evo_EnrollmentStatus;
+                    paymentMethod = preImageEnrollment.evo_PaymentMethod; //29541
+                    paymentFrequency = preImageEnrollment.evo_PaymentFrequency; //29541
+                }
+
+                // overwrite with any updated fields.
+                if (targetEnrollment.Contains("evo_enrollmentdate"))
+                    enrollmentDate = targetEnrollment.evo_EnrollmentDate;
+                if (targetEnrollment.Contains("evo_programid"))
+                    programRef = targetEnrollment.evo_programid;
+                if (targetEnrollment.Contains("evo_contactid"))
+                    customerRef = targetEnrollment.evo_contactid;
+                if (targetEnrollment.Contains("evo_enrollmentstatus"))
+                    enrollmentStatus = targetEnrollment.evo_EnrollmentStatus;
+                if (targetEnrollment.Contains("evo_eligibledate"))
+                    eligibleDate = targetEnrollment.evo_EligibleDate;
+                if (targetEnrollment.Contains("evo_paymentmethod")) //29541
+                    paymentMethod = targetEnrollment.evo_PaymentMethod;
+                if (targetEnrollment.Contains("evo_paymentfrequency")) //29541
+                    paymentFrequency = targetEnrollment.evo_PaymentFrequency;
+
+                // Validate Payment Frequency for WaterBill enrollments - defect 29541
+                if (paymentMethod != null && paymentFrequency != null &&
+                    paymentMethod.Value == (int)OptionSets.evo_paymentmethod.WaterBill && paymentFrequency.Value == (int)OptionSets.evo_paymentfrequency.Annually
+                    && enrollmentStatus.Value != (int)OptionSets.evo_enrollmentstatus.Cancelled)
+                {
+                    throw new InvalidPluginExecutionException("For WaterBill enrollments , Payment Frequency can not be set as Annually");
+                }
+
+                _tracingSvc.Trace("Checking if update is not coming from CRM.");
+                if (targetEnrollment.Contains("evo_integrationrecordsource") && targetEnrollment.evo_integrationrecordsource != null &&
+                    targetEnrollment.evo_integrationrecordsource.Value > 1)
+                    return;
+                
+                if (enrollmentDate == null)
+                {
+                    _tracingSvc.Trace("Enrollment Date is missing.");
+                    return;
+                }
+
+                if (eligibleDate == null)
+                {
+                    _tracingSvc.Trace("Eligible Date is missing.");
+                    return;
+                }
+
+                if (programRef == null)
+                {
+                    _tracingSvc.Trace("Enrollment's Program is missing.");
+                    return;
+                }
+                if (customerRef == null)
+                {
+                    _tracingSvc.Trace("Enrollment Customer is missing.");
+                    return;
+                }
+                if (enrollmentStatus == null)
+                {
+                    _tracingSvc.Trace("Enrollment Status is missing.");
+                    return;
+                }
+
+                if (enrollmentStatus.Value != (int)OptionSets.evo_enrollmentstatus.Active)
+                {
+                    _tracingSvc.Trace("Enrollment Status is not Active.");
+                    return;
+                }
+
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    //Query to find enrollment for Status = Active, Program = Target Enrollment Program and Enrollment Date = Target Enrollment Date
+                    var enrollmentLst = (from enr in svc.evo_enrollmentSet
+                                         where enr.evo_contactid.Id == customerRef.Id
+                                         && enr.evo_programid.Id == programRef.Id
+                                         && enr.evo_EnrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Active
+                                         && enr.evo_enrollmentId.Value != targetEnrollment.Id
+                                         select new
+                                         {
+                                             evo_enrollmentId = enr.evo_enrollmentId,
+                                             existingEligibleDate = enr.evo_EligibleDate.Value,
+                                             existingEndDate = enr.evo_EndDate.Value
+                                         }).ToList();
+
+                    if (enrollmentLst != null && enrollmentLst.Count > 0)
+                    {
+                        foreach (var enrollmentRef in enrollmentLst)
+                        {
+                            if (enrollmentRef != null && enrollmentRef.evo_enrollmentId != null)
+                                if (enrollmentRef.existingEligibleDate.ToUniversalTime().Date <= eligibleDate.Value.ToUniversalTime().Date &&
+                                    enrollmentRef.existingEndDate.ToUniversalTime().Date >= eligibleDate.Value.ToUniversalTime().Date)
+                                {
+                                    isValidEnrollment = false;
+                                    break;
+                                }
+                        }
+
+                    }
+
+                    if (!isValidEnrollment)
+                        PluginErrorHandler.ShowBusinessProcessError("Active Enrollment already exists for same customer and program.");
+                }
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_ValidateDuplicateEnrollment, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_ValidateDuplicateEnrollment, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        #region OnCreate_Mapping_Methods
+
+        /// <summary>
+        /// This method retrieves monthly and annual prices from Marketing Code and copy to the enrollment on create and update
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapMonthlyAnnualPriceFromMarketingCode(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            EntityReference marketingCode = null;
+
+            try
+            {
+
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                // Getting value from Pre Image
+                if (preImageEnrollment != null)
+                    marketingCode = preImageEnrollment.evo_marketingcodeid;
+
+                //Overriding from context
+                if (targetEnrollment.Contains("evo_marketingcodeid"))
+                    marketingCode = targetEnrollment.evo_marketingcodeid;
+
+                //Checking if Enrollment has Marketing code
+                if (marketingCode == null)
+                {
+                    _tracingSvc.Trace("Enrollment does not have Marketing Code.");
+                    return;
+                }
+
+                // Retreiveing Monthly Price and Annual Price from Marketing code
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var marketingCodeInfo = (from mktCode in svc.evo_marketingcodeSet
+                                             where mktCode.evo_marketingcodeId.Value == marketingCode.Id
+                                             select new
+                                             {
+                                                 evo_MonthlyPrice = mktCode.evo_MonthlyPrice,
+                                                 evo_AnnualPrice = mktCode.evo_AnnualPrice,
+
+                                             }).FirstOrDefault();
+                    if (marketingCodeInfo == null)
+                        return;
+
+                    // Assigning Monthly Price to Target enrollment Monthly Price
+                    if (marketingCodeInfo.evo_MonthlyPrice != null && marketingCodeInfo.evo_MonthlyPrice.Value > 0.0M)
+                        targetEnrollment.evo_MonthlyPrice = marketingCodeInfo.evo_MonthlyPrice;
+
+                    // Assigning Annual Price to Target enrollment Annual Price
+                    if (marketingCodeInfo.evo_AnnualPrice != null && marketingCodeInfo.evo_AnnualPrice.Value > 0.0M)
+                        targetEnrollment.evo_AnnualPrice = marketingCodeInfo.evo_AnnualPrice;
+
+                    _tracingSvc.Trace("Enrollment is associated with Monthly Price : {0} and Annual Price : {1}", targetEnrollment.evo_MonthlyPrice.Value, targetEnrollment.evo_AnnualPrice.Value);
+                }
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapAnnualandMontlhyPrice, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapAnnualandMontlhyPrice, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// This method maps Delinqeuncy flag and Contact Number from customer on to the target enrollment
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapCustomerDelinquency(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                //Checking if target has Contact
+                if (!targetEnrollment.Contains("evo_contactid") || targetEnrollment.evo_contactid == null)
+                {
+                    _tracingSvc.Trace("Enrollment does not have Customer associated with it.");
+                    return;
+                }
+
+                //Checking if target already have Customer Number and Delinquency flag to true 
+                if (targetEnrollment.Contains("evo_delinquent") && targetEnrollment.evo_Delinquent != null && targetEnrollment.evo_Delinquent == true
+                    && targetEnrollment.Contains("evo_contactnumber") && !string.IsNullOrEmpty(targetEnrollment.evo_contactnumber))
+                {
+                    _tracingSvc.Trace("Enrollment already have Customer Number and delinquent flag to true.");
+                    return;
+                }
+
+                // Retreiveing Customer Number and Delinquent flag from related Customer 
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var contactInfo = (from contact in svc.ContactSet
+                                       where contact.ContactId.Value == targetEnrollment.evo_contactid.Id
+                                       select new
+                                       {
+                                           evo_CustomerNumber = contact.evo_CustomerNumber,
+                                           evo_Delinquency = contact.evo_Delinquency
+
+                                       }).FirstOrDefault();
+
+                    if (contactInfo == null)
+                        return;
+
+                    if (!string.IsNullOrEmpty(contactInfo.evo_CustomerNumber))
+                        targetEnrollment.evo_contactnumber = contactInfo.evo_CustomerNumber;
+
+                    if (contactInfo.evo_Delinquency != null)
+                        targetEnrollment.evo_Delinquent = contactInfo.evo_Delinquency;
+                }
+            }
+
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapCustomerDelinquency, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapCustomerDelinquency, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// This method maps Diagnostic Period flag from Owning User's Diagnostic flag
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapDiagnosticPeriodFromOwningUser(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                //Checking if target has Owner 
+                if (!targetEnrollment.Contains("ownerid") || targetEnrollment.OwnerId == null)
+                {
+                    _tracingSvc.Trace("Enrollment does not have Owning user.");
+                    return;
+                }
+
+                if (targetEnrollment.Contains("evo_diagnosticperiod") && targetEnrollment.evo_DiagnosticPeriod != null && targetEnrollment.evo_DiagnosticPeriod == true)
+                {
+                    _tracingSvc.Trace("Diagnostic Flag on Enrollment already set to Yes.");
+                    return;
+                }
+
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var owningUserInfo = (from user in svc.SystemUserSet
+                                          where user.SystemUserId.Value == targetEnrollment.OwnerId.Id
+                                          select new
+                                          {
+                                              evo_DiagnosticPeriod = user.evo_DiagnosticPeriod
+
+                                          }).FirstOrDefault();
+
+                    if (owningUserInfo == null)
+                        return;
+
+                    if (owningUserInfo.evo_DiagnosticPeriod != null)
+                        targetEnrollment.evo_DiagnosticPeriod = owningUserInfo.evo_DiagnosticPeriod;
+
+                }
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapDiagnosticPeriodFromOwningUser, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapDiagnosticPeriodFromOwningUser, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// This method maps Order Taken By from Created By field
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapOrderTakenBy(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                if (targetEnrollment.Contains("evo_userid") && targetEnrollment.evo_userid != null)
+                {
+                    _tracingSvc.Trace("Enrollment already have Order Taken By associated with it.");
+                    return;
+                }
+
+                //Checking if target has created by field 
+                if (!targetEnrollment.Contains("createdby") || targetEnrollment.CreatedBy == null)
+                {
+                    _tracingSvc.Trace("Created By field is blank.");
+                    return;
+                }
+
+                // Mapping Order Taken By field
+                targetEnrollment.evo_userid = new EntityReference(SystemUser.EntityLogicalName, targetEnrollment.CreatedBy.Id);
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapOrderTakenBy, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapOrderTakenBy, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// This method is used to copy auto generated Enrollment Number to Name field
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapEnrollmentNumber(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                if (targetEnrollment.Contains("evo_name") && targetEnrollment.evo_name != null)
+                {
+                    _tracingSvc.Trace("Enrollment already have Name.");
+                    return;
+                }
+
+
+                if (!targetEnrollment.Contains("evo_enrollmentnumber") || string.IsNullOrEmpty(targetEnrollment.evo_EnrollmentNumber))
+                {
+                    _tracingSvc.Trace("Enrollment Number is missing.");
+                    return;
+                }
+
+                targetEnrollment.evo_name = targetEnrollment.evo_EnrollmentNumber;
+
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapEnrollmentNumber, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapEnrollmentNumber, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        /// <summary>
+        /// This method is used to set Surge Year
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapSurgeYear(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+            try
+            {
+
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                //Checking if target has Program 
+                if (!targetEnrollment.Contains("evo_programid") || targetEnrollment.evo_programid == null)
+                {
+                    _tracingSvc.Trace("Enrollment does not have Program.");
+                    return;
+                }
+
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var programInfo = (from prg in svc.evo_programSet
+                                       where prg.evo_programId.Value == targetEnrollment.evo_programid.Id
+                                       select new
+                                       {
+                                           evo_name = prg.evo_name
+
+                                       }).FirstOrDefault();
+
+                    if (programInfo == null || string.IsNullOrEmpty(programInfo.evo_name))
+                        return;
+
+                    if (programInfo.evo_name != _evo_programLabel__SURGE_PROTECTION_PROGRAM)
+                    {
+                        _tracingSvc.Trace("Program associated with Enrollment is not Surge Protection Program.");
+                        return;
+                    }
+
+                    //Assigning Surge Year
+                    if (targetEnrollment.Contains("evo_surgeyear") && targetEnrollment.evo_SurgeYear != null)
+                        targetEnrollment.evo_SurgeYear = targetEnrollment.evo_SurgeYear + 1;
+
+                    else
+                        targetEnrollment.evo_SurgeYear = 1;
+
+                    _tracingSvc.Trace("Enrollment's Surge Year is {0}", targetEnrollment.evo_SurgeYear.ToString());
+                }
+
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_MapSurgeYear, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_MapSurgeYear, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+        #endregion
+
+
+        #region OnUpdate_Mapping_Methods
+
+        /// <summary>
+        /// This method is used to set Enrollment Surge Date to Enrollment Date if Program is Surge Protection Program
+        /// and SurgeYear is equal to 'Null' or 1
+        /// </summary>
+        public void MapSurgeEnrollmentDate(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            DateTime? enrollmentDate = null;
+            EntityReference evo_programId = null;
+            int? evo_surgeYear = null;
+
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                // Getting values from Pre-Image
+                if (preImageEnrollment != null)
+                {
+                    enrollmentDate = preImageEnrollment.evo_EnrollmentDate;
+                    evo_programId = preImageEnrollment.evo_programid;
+                    evo_surgeYear = preImageEnrollment.evo_SurgeYear;
+                }
+
+                // overwrite with any updated fields.  
+                if (targetEnrollment.Contains("evo_enrollmentdate"))
+                    enrollmentDate = targetEnrollment.evo_EnrollmentDate;
+                if (targetEnrollment.Contains("evo_programid"))
+                    evo_programId = targetEnrollment.evo_programid;
+                if (targetEnrollment.Contains("evo_surgeyear"))
+                    evo_surgeYear = targetEnrollment.evo_SurgeYear;
+
+
+                if (enrollmentDate == null)
+                {
+                    _tracingSvc.Trace("Enrollment Date is missing.");
+                    return;
+                }
+
+                if (evo_programId == null)
+                {
+                    _tracingSvc.Trace("Enrollment Program is missing.");
+                    return;
+                }
+
+                _tracingSvc.Trace("Enrollment Program Id : {0}", evo_programId.Id);
+
+                if (evo_programId != null && evo_programId.Id != Guid.Empty)
+                {
+                    // Retrieving Program Id for Surge Protection Program 
+                    _tracingSvc.Trace("Retreiving ID for program - {0}", _evo_programLabel__SURGE_PROTECTION_PROGRAM);
+
+                    using (var svc = new EvolutionServiceContext(service))
+                    {
+                        svc.MergeOption = MergeOption.NoTracking;
+                        var programCodeRecord = svc.evo_programSet
+                                            .Where(x => x.evo_programId == evo_programId.Id)
+                                            .Select(x => new evo_program
+                                            {
+                                                evo_name = x.evo_name,
+                                            }).FirstOrDefault();
+
+
+                        _tracingSvc.Trace("Enrollment entity fields Enrollment Date : {0}, Program : {1}, Surge Year : {0}", enrollmentDate, programCodeRecord.evo_name, evo_surgeYear);
+
+                        // Condition to check whether Program is 'Surge Protection Program' and SurgeYear is equal to 'Null' or '1' then proceed further.
+                        if (programCodeRecord == null || string.IsNullOrEmpty(programCodeRecord.evo_name) || programCodeRecord.evo_name != _evo_programLabel__SURGE_PROTECTION_PROGRAM)
+                            return;
+
+                        if (evo_surgeYear == null || evo_surgeYear.Value == 1)
+                        {
+                            targetEnrollment.evo_SurgeEnrollmentDate = enrollmentDate;
+                            _tracingSvc.Trace("Updated SurgeEnrollmentDate : {0}", targetEnrollment.evo_SurgeEnrollmentDate);
+                        }
+                    }
+                }
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateSurgeEnrollmentDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception exception)
+            {
+                throw PluginErrorHandler.FormatMainMethodException(exception, ErrorCodes.Enrollment_PopulateSurgeEnrollmentDate, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+        }
+
+
+        #endregion
+
+        /// <summary>
+        /// This method asssign Auto Renew field value according to the Payment Method field
+        /// It will happen only in the case of Renewal Enrollment.
+        /// </summary>
+        /// <param name="localContext"></param>
+        private void MapAutoRenewFromPaymentMethod(IOrganizationService service, evo_enrollment targetEnrollment)
+        {
+
+            try
+            {
+                _tracingSvc.Trace("Execution Started : {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+                if (targetEnrollment.Contains("evo_autorenew") && targetEnrollment.evo_AutoRenew != null)
+                {
+                    _tracingSvc.Trace("Target enrollment has already Auto Renew field value.");
+                    return;
+                }
+
+                if (!targetEnrollment.Contains("evo_peenrollmentid") || targetEnrollment.evo_peenrollmentid == null)
+                {
+                    _tracingSvc.Trace("Missing Parent Enrollment in target enrollment so target is not a renewal enrollment.");
+                    return;
+                }
+
+                if (!targetEnrollment.Contains("evo_paymentmethod") || targetEnrollment.evo_PaymentMethod == null)
+                {
+                    _tracingSvc.Trace("Missing Payment method in Enrollment.");
+                    return;
+                }
+
+
+                if (!targetEnrollment.Contains("evo_enrollmentstatreasonid") || targetEnrollment.evo_enrollmentstatreasonid == null)
+                {
+                    _tracingSvc.Trace("Missing Enrollment Status Reason in Enrollment.");
+                    return;
+                }
+
+                evo_enrollmentstatusreason enrollmentStatusReasonEntity = service.Retrieve(targetEnrollment.evo_enrollmentstatreasonid.LogicalName, targetEnrollment.evo_enrollmentstatreasonid.Id, new ColumnSet("evo_name")).ToEntity<evo_enrollmentstatusreason>();
+
+                // Enrollment is not Renew enrollment as Enrollment Status Reason is not 'Renewal'
+                if (enrollmentStatusReasonEntity == null || string.IsNullOrEmpty(enrollmentStatusReasonEntity.evo_name) || enrollmentStatusReasonEntity.evo_name.ToLower() != _evo_enrollmentstatusreasonLabel_RENEWAL.ToLower())
+                    return;
+
+
+                _tracingSvc.Trace("Assigning Auto Renew field according to Payment Method.");
+                switch (targetEnrollment.evo_PaymentMethod.Value)
+                {
+
+                    case (int)OptionSets.evo_paymentmethod.WaterBill:
+                        targetEnrollment.evo_AutoRenew = new OptionSetValue((int)OptionSets.evo_autorenew.ToWaterBill);
+                        break;
+
+                    case (int)OptionSets.evo_paymentmethod.CreditCard:
+                        targetEnrollment.evo_AutoRenew = new OptionSetValue((int)OptionSets.evo_autorenew.ToCreditCard);
+                        break;
+
+                    case (int)OptionSets.evo_paymentmethod.ACH:
+                        targetEnrollment.evo_AutoRenew = new OptionSetValue((int)OptionSets.evo_autorenew.ToACH);
+                        break;
+
+                    case (int)OptionSets.evo_paymentmethod.Check:
+                    case (int)OptionSets.evo_paymentmethod.eCheck:
+                        targetEnrollment.evo_AutoRenew = null;
+                        break;
+                }
+
+            }
+            catch (InvalidPluginExecutionException invalidPluginExecutionException)
+            {
+                throw PluginErrorHandler.FormatMainMethodException<InvalidPluginExecutionException>(invalidPluginExecutionException, ErrorCodes.Enrollment_PopulateCCHTax, GetType().FullName, System.Reflection.MethodBase.GetCurrentMethod().Name);
+            }
+            catch (Exception ex)
+            {
+                PluginErrorHandler.ShowBusinessProcessError("Failed to retrieve tax information from CCH. Please try later or contact administrator with error code: " + ErrorCodes.Enrollment_PopulateCCHTax_ServiceNotReachable
+                    + System.Environment.NewLine + ex.Message);
+            }
+            _tracingSvc.Trace("Ended: {0}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+        }
+
+        private string GetEnrollmentStatusReasonName(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+
+            string enrollmentStatusReasonName = String.Empty;
+
+            EntityReference enrollmentStatusReasonRef = targetEnrollment.Contains("evo_enrollmentstatreasonid") && targetEnrollment.evo_enrollmentstatreasonid != null ? targetEnrollment.evo_enrollmentstatreasonid : preImageEnrollment.evo_enrollmentstatreasonid != null ? preImageEnrollment.evo_enrollmentstatreasonid : null;
+            if (enrollmentStatusReasonRef != null)
+            {
+                using (var svc = new EvolutionServiceContext(service))
+                {
+                    svc.MergeOption = MergeOption.NoTracking;
+                    var enrollmentStatusReason = svc.evo_enrollmentstatusreasonSet.Where(x => x.evo_enrollmentstatusreasonId == enrollmentStatusReasonRef.Id).Select(x => new evo_enrollmentstatusreason { evo_name = x.evo_name }).FirstOrDefault();
+                    enrollmentStatusReasonName = enrollmentStatusReason != null && enrollmentStatusReason.Contains("evo_name") ? enrollmentStatusReason.evo_name : string.Empty;
+                }
+            }
+
+            return enrollmentStatusReasonName;
+        }
+        //29605
+        private void ClearOutCancellationFields(IOrganizationService service, evo_enrollment targetEnrollment, evo_enrollment preImageEnrollment)
+        {
+            // Conditional variables
+            OptionSetValue finalEnrollmentStatus = targetEnrollment.Contains("evo_enrollmentstatus") ? targetEnrollment.evo_EnrollmentStatus : null;
+            OptionSetValue previousEnrollmentStatus = preImageEnrollment.Contains("evo_enrollmentstatus") ? preImageEnrollment.evo_EnrollmentStatus : null;
+            //if status is changed from suspended to active clear out cancelaltion date and requested date,29605
+            if (finalEnrollmentStatus != null && finalEnrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Active &&
+                 previousEnrollmentStatus != null && previousEnrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Suspended)
+            {
+                targetEnrollment.evo_CancellationDate = null;
+                targetEnrollment.evo_CancellationRequestedDate = null;
+            }
+
+        }
+
+        private bool IsRequestRefundCompleted(IOrganizationService _service, evo_enrollment _target)
+        {
+            using (var context = new EvolutionServiceContext(_service) { MergeOption = MergeOption.NoTracking })
+            {
+                var isCancellationRefundCompleted = context.evo_enrollmentSet
+                                                           .Where(e => e.evo_enrollmentId == _target.Id)
+                                                           .Select(e => Convert.ToBoolean(e.evo_iscancellationrefundcomplete))
+                                                           .FirstOrDefault();
+                if (isCancellationRefundCompleted)
+                {
+                    return true;
+                }
+
+                return false;
+            }
+        }
+
+        private void LockBoxAssignParentEnrollment(IOrganizationService _service,evo_enrollment targetEnrollment)
+        {
+            //29345 added for lockbox to assign parent enrollment in case of duplicate records from lockbox file.
+            EntityReference customerRef=null;
+            EntityReference programRef=null;
+            var enrollmentId=Guid.Empty;
+            String enrollmentStatusReasonName = null;
+            customerRef = targetEnrollment.evo_contactid;
+            programRef = targetEnrollment.evo_programid;
+
+
+           
+            if (targetEnrollment.evo_OrderSource != null && targetEnrollment.evo_OrderSource.Value == 2 && targetEnrollment.evo_peenrollmentid == null )
+            {
+                enrollmentStatusReasonName = GetEnrollmentStatusReasonName(_service, targetEnrollment, null);
+                if (enrollmentStatusReasonName == "Renewal")
+                {
+                    using (var svc = new EvolutionServiceContext(_service))
+                    {
+                       //Fetch the latest active enrollment for matching customer and program. 
+                        svc.MergeOption = MergeOption.NoTracking;
+                        var enrollmentRecord = svc.evo_enrollmentSet
+                           .Where(x => x.evo_contactid.Id == customerRef.Id
+                           && x.evo_programid != null && x.evo_programid.Id == programRef.Id
+                           && x.evo_EnrollmentStatus != null && x.evo_EnrollmentStatus.Value == (int)OptionSets.evo_enrollmentstatus.Active)
+                           .Select(x => new evo_enrollment
+                           {
+                               Id=x.evo_enrollmentId.Value,
+                                evo_EndDate=x.evo_EndDate
+                           }).ToList().OrderByDescending(y => y.evo_EndDate).FirstOrDefault();
+
+                        if (enrollmentRecord != null)
+                        {
+                            enrollmentId = enrollmentRecord.evo_enrollmentId != null ? enrollmentRecord.evo_enrollmentId.Value : Guid.Empty;
+                            targetEnrollment.evo_peenrollmentid = new EntityReference(evo_enrollment.EntityLogicalName, enrollmentId);
+
+                        }            
+                    }
+                }
+            }
+           
+        }
+    }
+}

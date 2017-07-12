@@ -1,0 +1,2780 @@
+var CREATE_MODE = 1;
+var UPDATE_MODE = 2;
+var PAYMENT_FREQUENCY_ANNUALLY = "Annually";
+var PAYMENT_FREQUENCY_MONTHLY = "Monthly";
+var PAYMENT_FREQUENCY_QUARTERLY = "Quarterly";
+var PAYMENT_FREQUENCY_BIMONTHLY = "Bi-Monthly";
+var renewalMarketingCodeId = "";
+var renewalMarketingCodeName = "";
+var renewalEnrollmentStatusReasonId = "";
+var renewalEnrollmentStatusReasonName = "";
+var reEnrollEnrollmentStatusReason = "";
+var renewalMarketinglist = [];
+var collectionMarketinglist = "";
+var filteredRenewalMarketinglist = [];
+var collectionindex = 0;
+var filteredcollectionindex = 0;
+var marketingCodeMonthlyPrice = "";
+var marktingCodeAnnualPrice = "";
+var enrollmentStatusReason = "";
+var enrollmentStatusReasonId = "";
+var ENROLLMENT_STATUS_CLOSED = "5";
+var ENROLLMENT_STATUS_ACTIVE = "2";
+var ENROLLMENT_STATUS_DRAFT = "3";
+var ENROLLMENT_STATUS_CANCELLATION_FAILURE = "12";
+var ENROLLMENT_STATUS_SUSPENDED = "6";
+var ENROLLMENT_STATUS_CANCELLED = "4";
+var ENROLLMENT_ORDER_SOURCE_PHONE = "1";
+var DONOTAUTORENEW = "3"
+var DONOTAUTORENEW_TOWATERBILL = "1";
+var draftEnrollmentCheck;
+var _CustomerReferenceID = null;
+var _ETSPaymentInstrumentID = null;
+var paymentMethodArray = [];
+var index = 0;
+var TnCExceptionsCheck = false;
+var _leapYearMonth = 01;
+var _leapYearDate = 29;
+var REFUNDTYPE_CREDIT = 3;
+var REFUNDTYPE_CREDITCARD = 1;
+var ENROLLMENT_STATUS_REASON_SAMEDAYCANCELLATION = "Same Day Cancellation";
+var ENROLLMENT_STATUS_REASON_EXPIREDENROLLMENT = "Expired Enrollment";
+var ENROLLMENT_STATUS_REASON_RENEWAL = "Renewal";
+var ENROLLMENT_STATUS_REASON_DUPLICATECUST="Duplicate Customers Found";
+var ENROLLMENT_STATUS_REASON_CUSTNOTFOUND="Customer Name Not Located in System";
+var parentEnrollment = null;
+var currentEnrollment = null;
+var MARKETINGCODESTATUS_ACTIVE = 1;
+var MARKETINGCODESTATUS_DEACTIVATED = 2;
+var MARKETINGCODESTATUS_PENDING = 3;
+var MARKETINGCODESTATUS_EXPIRED = 4;
+var MARKETINGCODESTATUS_VALIDATION_FAILED = false;
+var MARKETINGCODESTATUS_VALIDATION_ERROR_MSG = null;
+
+if (typeof (AWE) == "undefined")
+{ AWE = {}; }
+if (typeof (AWE.Evolution) == "undefined")
+{ AWE.Evolution = {}; }
+if (typeof (AWE.Evolution.WebResources) == "undefined")
+{ AWE.Evolution.WebResources = {}; }
+if (typeof (AWE.Evolution.WebResources.Global) == "undefined")
+{ AWE.Evolution.WebResources.Global = {}; }
+
+
+AWE.Evolution.Schema = {
+    evo_locationcode: {
+        evo_wbill: {
+            NULLORNONE: 1,
+            WATERBILL: 2,
+            WATERBILLONLY: 3
+
+        }
+    },
+    evo_enrollment: {
+        evo_paymentmethod: {
+            WATERBILL: 1,
+            CREDIT_CARD: 2,
+            CHECK: 3,
+            ACH: 4,
+            ECHECK: 5
+        },
+        evo_paymentmethodText: {
+            WATERBILL: "WaterBill",
+            CREDIT_CARD: "Credit Card",
+            CHECK: "Check",
+            ACH: "ACH",
+            ECHECK: "eCheck"
+        },
+        evo_autorenew: {
+            To_WaterBill: 1,
+            To_CREDIT_CARD: 2,
+            To_ACH: 4
+        }
+    }
+}
+
+AWE.Evolution.WebResources.evo_enrollment = {
+    // Main form Events
+    onLoad: function () {
+        var formTypeCode = Xrm.Page.ui.getFormType();
+
+        AWE.Evolution.WebResources.FilterPaymentMethodOnLoad();
+
+        switch (formTypeCode) {
+            case CREATE_MODE:
+                AWE.Evolution.WebResources.evo_enrollment.InitFields(); // defaults fields
+                AWE.Evolution.WebResources.setCancellationDollarAmount();
+                AWE.Evolution.WebResources.getMarketingCodeDetails();
+                AWE.Evolution.WebResources.getProgramOnChangeOfMarketingCodeDetails();
+                AWE.Evolution.WebResources.setPaymentMethodNullOnReenrollAndStatusReenroll();
+                AWE.Evolution.WebResources.preFilterMarketingCodeLookup();
+                AWE.Evolution.WebResources.ProceedAnywayfieldVisibility();
+                break;
+            case UPDATE_MODE:
+                AWE.Evolution.WebResources.preFilterMarketingCodeLookup();
+                break;
+        }
+    },
+    onSave: function (execContext) {
+              
+        MARKETINGCODESTATUS_VALIDATION_ERROR_MSG = null;
+        MARKETINGCODESTATUS_VALIDATION_FAILED = false;
+        //Defect : 25730 Reverting Marketingcode and Program data on OnSave
+        var evo_marketingcodeidAttr = Xrm.Page.getAttribute("evo_marketingcodeid");
+        var evo_programidAttr = Xrm.Page.getAttribute("evo_programid");
+        var evo_eligibledateAttr = Xrm.Page.getAttribute("evo_eligibledate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+        var evo_enrollmentdateAttr = Xrm.Page.getAttribute("evo_enrollmentdate");
+        var evo_paymentMethodAttr = Xrm.Page.getAttribute("evo_paymentmethod");
+        var evo_paymentFrequencyAttr = Xrm.Page.getAttribute("evo_paymentfrequency");
+        var evo_locationcodeidAttr = Xrm.Page.getAttribute("evo_locationcodeid");
+        var formTypeCode = Xrm.Page.ui.getFormType();
+        var evo_marketingcodeid = null;
+        if (evo_marketingcodeidAttr.getValue()) {
+            evo_marketingcodeid = evo_marketingcodeidAttr.getValue()[0].id;
+
+            //29404 Validate marketing code only on create mode.
+            if (AWE.Evolution.WebResources.Global.getFormType() === CREATE_MODE ||
+               (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == ENROLLMENT_STATUS_DRAFT)
+               ) { // Defect : 23323 Validate MarketingCode Status.
+                AWE.Evolution.WebResources.ValidateMarketingCodeStatus(evo_marketingcodeid);
+                if (MARKETINGCODESTATUS_VALIDATION_FAILED == true) {
+                    alert(MARKETINGCODESTATUS_VALIDATION_ERROR_MSG);
+                    execContext.getEventArgs().preventDefault();
+                }
+            }
+            if (evo_marketingcodeidAttr.getIsDirty())
+                evo_marketingcodeidAttr.setSubmitMode("always");
+        }
+       
+        var locationName = AWE.Evolution.WebResources.Global.getLookupName("evo_locationcodeid");
+        if (locationName != null) {
+         
+            var today = new Date();
+            today.setHours(0, 0, 0, 0);
+          
+            if (locationName.toUpperCase().trim() == "NEW YORK CITY, NY") {
+             
+                if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") != null) {
+                 
+                    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == ENROLLMENT_STATUS_CANCELLED) {
+
+                        var cancellationoptionvalue = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_cancellationoption");
+                        var cancellationDate;
+
+
+                        if (cancellationoptionvalue === 0) { //If the cancellation option is: "Requested Date"
+
+                            cancellationDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_cancellationrequesteddate");
+
+
+                            if (cancellationDate != null) {
+                                // cancellationDate.setHours(0, 0, 0, 0);
+
+                                if (cancellationDate < today) {
+                                    if (AWE.Evolution.WebResources.Global.dateDiffInDays(cancellationDate, today) > 60) {
+                                        alert('For NYC customers you cannot enter a cancellation requested date more than 60 days in the past.');
+                                        execContext.getEventArgs().preventDefault();
+                                    }
+                                }
+
+                            }
+                            else {
+                                alert('For NYC customers cancellation requested date cannot be empty.');
+                                execContext.getEventArgs().preventDefault();
+
+                            }
+
+                        }
+                        else {
+
+                            alert('For NYC customers you must select the Requested Date Cancellation Option.');
+                            execContext.getEventArgs().preventDefault();
+
+                        }
+
+
+                    } else if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == ENROLLMENT_STATUS_ACTIVE && formTypeCode == CREATE_MODE) {
+                       
+                        var enrollmentDate = Xrm.Page.getAttribute("evo_enrollmentdate").getValue();
+                        if (enrollmentDate != null) {
+                          
+                            //     enrollmentDate.setHours(0, 0, 0, 0);
+                            if (enrollmentDate < today) {
+                             
+                                if (AWE.Evolution.WebResources.Global.dateDiffInDays(enrollmentDate, today) > 30) {
+                                    alert('For NYC customers you cannot enter an enrollment more than 30 days in the past.');
+                                    execContext.getEventArgs().preventDefault();
+                                }
+                            }
+                            else {
+                                if (AWE.Evolution.WebResources.Global.dateDiffInDays(today, enrollmentDate) > 30) {
+                                    alert('For NYC customers you cannot enter an enrollment more than 30 days in the future.');
+                                    execContext.getEventArgs().preventDefault();
+                                }
+
+
+
+
+
+                            }
+                        }
+                    }
+                }
+            }
+            //for all enrollments make sure enrollment is not more than 3 years in the future
+           
+            if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == ENROLLMENT_STATUS_ACTIVE && formTypeCode == CREATE_MODE) {
+                 
+                var paymentMethod =  AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+                if (paymentMethod != null) {
+                    if (paymentMethod != AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CHECK){
+                        var enrollmentDate = Xrm.Page.getAttribute("evo_enrollmentdate").getValue();
+                        if (enrollmentDate != null) {
+                            //    enrollmentDate.setHours(0, 0, 0, 0);
+                            if (enrollmentDate > today) {
+                                if (AWE.Evolution.WebResources.Global.dateDiffInDays(today, enrollmentDate) > 1095) {
+                                    alert('You cannot enter an enrollment more than 3 years in the future.');
+                                    execContext.getEventArgs().preventDefault();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+
+        }
+
+
+
+
+        if (evo_programidAttr.getValue()) {
+            if (evo_programidAttr.getIsDirty())
+                evo_programidAttr.setSubmitMode("always");
+        }
+
+        if (evo_enrollmentdateAttr.getValue()) {
+            if (evo_enrollmentdateAttr.getIsDirty())
+                evo_enrollmentdateAttr.setSubmitMode("always");
+        }
+
+        if (evo_eligibledateAttr.getValue()) {
+            if (evo_eligibledateAttr.getIsDirty())
+                evo_eligibledateAttr.setSubmitMode("always");
+        }
+
+        if (evo_enddateAttr.getValue()) {
+            if (evo_enddateAttr.getIsDirty())
+                evo_enddateAttr.setSubmitMode("always");
+        }
+
+        if (evo_paymentMethodAttr.getValue()) {
+            if (evo_paymentMethodAttr.getIsDirty())
+                evo_paymentMethodAttr.setSubmitMode("always");
+        }
+
+        if (evo_paymentFrequencyAttr.getValue()) {
+            if (evo_paymentFrequencyAttr.getIsDirty())
+                evo_paymentFrequencyAttr.setSubmitMode("always");
+        }
+        if (evo_locationcodeidAttr.getValue()) {
+            if (evo_locationcodeidAttr.getIsDirty())
+                evo_locationcodeidAttr.setSubmitMode("always");
+        }
+                     
+
+        // Defect : 25745  Set last user name who modified the record.
+        AWE.Evolution.WebResources.getLastUserName();
+    },
+    Messages: {
+        missingEnrollmentStatusReasonFormat: "Missing: Enrollment Status Reason with name = '{0}', contact CRM Admin.",
+        customerWaterBillShutoffMsg: "Customer has Waterbill shutoff.",
+        customerDelinquentConfirmMsg: "Customer is delinquent. Are you sure you would like to proceed?",
+        enrollmentWaterBillShutoffMsg: "Enrollment has Waterbill shutoff.",
+        duplicateEnrollment: "This Customer already has a Pending Draft Enrollment with the same Program.",
+        noEnrollmentsCreatedForPendingOrDeactivatedMarketingCode: "Enrollment cannot be created with Pending/Deactivated MarketingCode.",
+        onlyRenewalEnrollmentsAllowedForExpiredMarketingCode: "Status of MarketingCode is 'Expired' and only Enrollment where 'Enrollment Status Reason' is 'Renewal' can be created with  such MarketingCode."
+    },
+    Validation: {
+        CheckForDraftEnrollments: function () {
+            var customerId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+            var selectedProgramId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_programid");
+
+            // Validating Contact related info.
+            if (customerId == null || customerId == '')
+                return;
+
+            customerId = customerId.replace('{', '').replace('}', '');
+
+            if (selectedProgramId == null || selectedProgramId == '')
+                return;
+
+            selectedProgramId = selectedProgramId.replace('{', '').replace('}', '');
+
+            if (AWE.Evolution.WebResources.checkForDraftEnrollment(customerId, selectedProgramId)) {
+                var attributes = Xrm.Page.data.entity.attributes.get();
+                for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+                alert(AWE.Evolution.WebResources.evo_enrollment.Messages.duplicateEnrollment);
+                Xrm.Page.ui.close();
+            }
+        }
+    },
+    // Attributes, event controllers, and properties
+    evo_contactid: {
+        onChange: function () {
+            AWE.Evolution.WebResources.evo_enrollment.SyncAndValidateSelectedContact();
+            AWE.Evolution.WebResources.preFilterMarketingCodeLookupOnChange();
+            AWE.Evolution.WebResources.PopulateLocationCodeForProblemEnrollment();
+        }
+    },
+    evo_locationcodeid: {
+        onChange: function () {
+            AWE.Evolution.WebResources.FilterPaymentMethod();
+            AWE.Evolution.WebResources.preFilterMarketingCodeLookupOnChange();
+            if (Xrm.Page.getAttribute("evo_subtotal") != null)
+                Xrm.Page.getAttribute("evo_subtotal").fireOnChange();
+        }
+    },
+    evo_enrollmentstatus: {
+        ACTIVE: 2,
+        DRAFT: 3,
+        CANCELLED: 4,
+        CLOSED: 5,
+        SUSPENDED: 6,
+        PROBLEMENROLLMENT: 9,
+        PRECANCELLATIONNOTIFICATION: 10,
+        ENROLLMENTFAILURE: 11,
+        CANCELLATIONFAILURE: 12
+    },
+    evo_marketingcodeid: {
+        onChange: function () {
+            AWE.Evolution.WebResources.getMarketingCodeDetails();
+            AWE.Evolution.WebResources.getProgramOnChangeOfMarketingCodeDetails();
+            if (Xrm.Page.getAttribute("evo_subtotal") != null)
+                Xrm.Page.getAttribute("evo_subtotal").fireOnChange();
+        }
+    },
+    evo_paymentmethod: {
+        WATERBILL: 1,
+        CREDITCARD: 2,
+        CHECK: 3,
+        ACH: 4,
+        ECHECK: 5,
+        onChange: function () {
+            AWE.Evolution.WebResources.SetAutoRenewWithPaymentMethod();
+        }
+    },
+    evo_paymentfrequency: {
+        onChange: function () {
+            AWE.Evolution.WebResources.getMarketingCodeDetails();
+        }
+    },
+    evo_programid: {
+        onChange: function () {
+            var formTypeCode = Xrm.Page.ui.getFormType();
+            switch (formTypeCode) {
+                case CREATE_MODE:
+                    AWE.Evolution.WebResources.evo_enrollment.AdjustForNewSurgeProtectProgram();
+                    AWE.Evolution.WebResources.evo_enrollment.Validation.CheckForDraftEnrollments();
+                    AWE.Evolution.WebResources.FilterPaymentMethod();
+                    AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+                    if (Xrm.Page.getAttribute("evo_subtotal") != null)
+                        Xrm.Page.getAttribute("evo_subtotal").fireOnChange();
+                    break;
+                case UPDATE_MODE:
+                    AWE.Evolution.WebResources.evo_enrollment.Validation.CheckForDraftEnrollments();
+                    AWE.Evolution.WebResources.FilterPaymentMethod();
+                    AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+                    if (Xrm.Page.getAttribute("evo_subtotal") != null)
+                        Xrm.Page.getAttribute("evo_subtotal").fireOnChange();
+                    break;
+            }
+        }
+    },
+    evo_subtotal: {
+        onChange: function () {
+            AWE.Evolution.WebResources.CCHTax.Calculate();
+        }
+    },
+    evo_cancellationdate: {
+        onChange: function () {
+            AWE.Evolution.WebResources.evo_enrollment.ValidateCancellationDate();
+        }
+    },
+    evo_cancellationrequesteddate: {
+        onChange: function () {
+            AWE.Evolution.WebResources.evo_enrollment.ValidateCancellationRequestedDate();
+        }
+    },
+    
+    evo_enrollmentstatusreason: {
+
+        onChange: function () {
+            AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+        }
+    },
+
+    evo_peenrollmentid: {
+
+        onChange: function () {
+            AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+        }
+    },
+    // Functions
+    //30021
+
+    DisplayUserAlert: function () {
+        if (AWE.Evolution.WebResources.evo_enrollment.IsParentEnrollmentActive()) {
+            alert('Please cancel the active parent enrollment');
+        }
+    },
+
+    IsParentEnrollmentActive: function () {
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+        var parentEnrollment = Xrm.Page.getAttribute("evo_peenrollmentid");
+	
+        if ((evo_enrollmentstatusAttr.getValue() == 4) &&
+            (parentEnrollment.getValue() !== null && parentEnrollment.getValue() !== '' && parentEnrollment.getValue()[0].id !== null)) {
+            var parentEnrollmentStatus;
+            AWE.Evolution.WebResources.Global.retrieveRecord(
+                   parentEnrollment.getValue()[0].id,
+                   "evo_enrollmentSet",
+                   function (result) {
+                       if (result !== '' && result !== null) {
+                           parentEnrollmentStatus = result.evo_EnrollmentStatus;
+                       }
+                   },
+                   AWE.Evolution.WebResources.Global.errorCallback,
+                   false);
+
+            if (parentEnrollmentStatus.Value == 2) return true;
+            else return false;
+        }
+    },
+
+    AdjustForNewSurgeProtectProgram: function () {
+        // Form field references
+        var evo_programidAttr = Xrm.Page.getAttribute("evo_programid");
+        var evo_eligibledateAttr = Xrm.Page.getAttribute("evo_eligibledate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+        var evo_enrollmentstatreasonidAttr = Xrm.Page.getAttribute("evo_enrollmentstatreasonid");
+        var evo_autorenew = Xrm.Page.getAttribute("evo_autorenew");
+        var evo_autorenewDisabled = Xrm.Page.getControl("evo_autorenew");
+
+
+
+        var targetEnrollmentStatusReasonName = "Pending Install";
+        var targetEnrollmentStatusReasonNameFilter =
+            "?$top=1&$filter=evo_name eq '{0}'"
+            .replace(/\{0\}/g, targetEnrollmentStatusReasonName);
+
+        var targetEnrollmentStatusReasonNameNotFoundMsg =
+            AWE.Evolution.WebResources.evo_enrollment.Messages.missingEnrollmentStatusReasonFormat
+            .replace(/\{0\}/g, targetEnrollmentStatusReasonName);
+
+        if (evo_programidAttr != null &&
+            evo_programidAttr.getValue() != null &&
+            evo_programidAttr.getValue()[0].name == "Surge Protection Program") {
+
+            evo_autorenew.setValue(DONOTAUTORENEW_TOWATERBILL);
+            evo_autorenewDisabled.setDisabled(true);
+            evo_eligibledateAttr.setValue(null);
+            evo_enddateAttr.setValue(null);
+            evo_enrollmentstatusAttr.setValue(AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.DRAFT);
+
+            // Setup Enrollment Status lookup to Pending Install
+            AWE.Evolution.WebResources.Global.retrieveMultiple(
+                "evo_enrollmentstatusreasonSet",
+                targetEnrollmentStatusReasonNameFilter,
+                function (result) {
+                    if (result !== null && result !== '' && result.length > 0) {
+                        var enrollmentStatusReasonLookup = new Array();
+                        enrollmentStatusReasonLookup[0] = new Object();
+                        enrollmentStatusReasonLookup[0].id = result[0].evo_enrollmentstatusreasonId;
+                        enrollmentStatusReasonLookup[0].name = result[0].evo_name;
+                        enrollmentStatusReasonLookup[0].entityType = "evo_enrollmentstatusreason";
+                        evo_enrollmentstatreasonidAttr.setValue(enrollmentStatusReasonLookup);
+                    }
+                    else {
+                        // Can't find the enrollmentstatusreason.
+                        alert(targetEnrollmentStatusReasonNameNotFoundMsg);
+                    }
+                },
+                AWE.Evolution.WebResources.Global.errorCallback,
+                true);
+            return true;
+        }
+        else {
+            evo_autorenewDisabled.setDisabled(false);
+        }
+
+        return false;
+    },
+    CalculateEnrollmentDates: function () {
+        //Initialize global variables being used within this function.
+
+        TnCExceptionsCheck = false;
+        var calculatedEnrollmentDate = null;
+        var originalEligibleDate = null;
+        var calculatedEligibleDate = null;
+
+        // Form field references
+        var evo_insuracecustomerAttr = Xrm.Page.getAttribute("evo_insuracecustomer");
+        var evo_locationcodeidAttr = Xrm.Page.getAttribute("evo_locationcodeid");
+        var evo_programidAttr = Xrm.Page.getAttribute("evo_programid");
+        var evo_eligibledateAttr = Xrm.Page.getAttribute("evo_eligibledate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+        var evo_enrollmentstatreasonidAttr = Xrm.Page.getAttribute("evo_enrollmentstatreasonid");
+        var evo_enrollmentdateAttr = Xrm.Page.getAttribute("evo_enrollmentdate");
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+
+        if (evo_programidAttr != null &&
+            evo_programidAttr.getValue() != null &&
+            evo_programidAttr.getValue()[0].name == "Surge Protection Program") {
+            return;
+        }
+
+        //evo_enrollmentstatreasonidAttr.getValue()[0].name
+        //Defect 22143 and 22234 - Handles both scenarios that are trigered by Re-enroll
+        // Defect 23709 - Test Case - 17288 Step 14 - Enrollment Status reason incorrectly populated
+        if (evo_enrollmentstatreasonidAttr != null && evo_enrollmentstatreasonidAttr.getValue() != null &&
+            (evo_enrollmentstatreasonidAttr.getValue()[0].name == "Re-enrollment" || evo_enrollmentstatreasonidAttr.getValue()[0].name == "Re-enrollment - Saved")) {
+            return;
+        }
+        // If Enrollment is Renewal enrollment
+        if (evo_enrollmentstatreasonidAttr != null && evo_enrollmentstatreasonidAttr.getValue() != null && evo_enrollmentstatreasonidAttr.getValue()[0].name == "Renewal") {
+
+            if (Xrm.Page.ui.getFormType() != CREATE_MODE) {
+                //Get the enrollment status from database
+                AWE.Evolution.WebResources.evo_enrollment.GetCurrentEnrollmentStatus();
+
+                if (currentEnrollment === null || currentEnrollment === '' || currentEnrollment.evo_EnrollmentStatus.Value != AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.PROBLEMENROLLMENT)
+                    return;
+            }
+            AWE.Evolution.WebResources.evo_enrollment.GetParentEnrollmentDates();
+
+            if (parentEnrollment === null || parentEnrollment === '') {
+                alert("Please enter Parent Enrollment to calculate the dates.");
+                evo_enrollmentdateAttr.setValue(null);
+                evo_eligibledateAttr.setValue(null);
+                evo_eligibledateAttr.setSubmitMode("always");
+                evo_enddateAttr.setValue(null);
+                evo_enddateAttr.setSubmitMode("always");
+                return;
+            }
+            if (parentEnrollment.evo_EndDate === null || parentEnrollment.evo_EndDate === '') {
+                alert("Parent Enrollment does not have End Date.");
+                evo_enrollmentdateAttr.setValue(null);
+                evo_eligibledateAttr.setValue(null);
+                evo_eligibledateAttr.setSubmitMode("always");
+                evo_enddateAttr.setValue(null);
+                evo_enddateAttr.setSubmitMode("always");
+                return;
+            }
+            else {
+
+                var parentEnrollmentEndDate = new Date(parseInt(parentEnrollment.evo_EndDate.replace("/Date(", "").replace(")/", ""), 10));
+
+                //To resolve timezone issue for datetime difference 
+                var adjustedEndDate = AWE.Evolution.WebResources.Global.calculateAdjustedDate(parentEnrollmentEndDate);
+
+                calculatedEnrollmentDate = new Date(adjustedEndDate.setDate(adjustedEndDate.getDate() + 1));
+                originalEligibleDate = new Date(adjustedEndDate);
+                calculatedEligibleDate = new Date(adjustedEndDate);
+
+                //For renewal, we always assume that end date is always a year from now
+                calculatedEndDate = AWE.Evolution.WebResources.EndDateCalculation(adjustedEndDate, true);
+            }
+        }
+        else {
+
+            //Only calculate date for New enrollment And for existing enrollment calculate dates only when Enrollment status is changed from Problem Enrollment to Active
+            if (Xrm.Page.ui.getFormType() != CREATE_MODE) {
+                //Get the enrollment status from database
+                AWE.Evolution.WebResources.evo_enrollment.GetCurrentEnrollmentStatus();
+
+                if (currentEnrollment === null || currentEnrollment === '' ||
+                    currentEnrollment.evo_EnrollmentStatus.Value !== AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.PROBLEMENROLLMENT
+                    || evo_enrollmentstatusAttr.getValue() !== AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.ACTIVE)
+                    return;
+            }
+
+            calculatedEnrollmentDate = evo_enrollmentdateAttr.getValue() != null ? evo_enrollmentdateAttr.getValue() : new Date();
+            originalEligibleDate = new Date(calculatedEnrollmentDate);
+            calculatedEligibleDate = new Date(originalEligibleDate.setDate(originalEligibleDate.getDate() + 30));
+
+            // Business Logic Flags       
+            //var isInsanceCustomerFlag = (evo_insuracecustomerAttr != null && evo_insuracecustomerAttr.getValue()) ? true : false;
+
+            /*Commented on existing code as per discussion 20188  & 20224. 
+            Need to check if T&C for the selected evo_locationcode is Yes or NO
+            */
+            //var isOrlandoFLCustomerFlag = (evo_locationcodeidAttr.getValue() !== null && evo_locationcodeidAttr.getValue()[0].name == "Orlando, FL") ? true : false;
+            if (evo_locationcodeidAttr.getValue() !== null && evo_locationcodeidAttr.getValue() !== '' && evo_locationcodeidAttr.getValue()[0].id !== null) {
+
+                var locCodefilter = "?$select=evo_TnCExceptions&$filter=evo_locationcodeId eq guid'" + evo_locationcodeidAttr.getValue()[0].id + "'";
+
+                AWE.Evolution.WebResources.Global.retrieveMultiple("evo_locationcodeSet", locCodefilter,
+                            AWE.Evolution.WebResources.getTnCExceptionsSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+            }
+
+            var calculatedEndDate = AWE.Evolution.WebResources.EndDateCalculation(calculatedEligibleDate, TnCExceptionsCheck);
+        }
+
+        // Set the fields
+        if ((evo_enrollmentdateAttr.getValue() == null && calculatedEnrollmentDate != null) || (evo_enrollmentdateAttr.getValue().setHours(0, 0, 0, 0) != calculatedEnrollmentDate.setHours(0, 0, 0, 0))) {
+            evo_enrollmentdateAttr.setValue(calculatedEnrollmentDate);
+        }
+        if ((evo_eligibledateAttr.getValue() == null && originalEligibleDate != null) || (evo_eligibledateAttr.getValue().setHours(0, 0, 0, 0) != originalEligibleDate.setHours(0, 0, 0, 0))) {
+            evo_eligibledateAttr.setValue(originalEligibleDate);
+            evo_eligibledateAttr.setSubmitMode("always");
+        }
+        if ((evo_enddateAttr.getValue() == null && calculatedEndDate != null) || (evo_enddateAttr.getValue().setHours(0, 0, 0, 0) != calculatedEndDate.setHours(0, 0, 0, 0))) {
+            evo_enddateAttr.setValue(calculatedEndDate);
+            evo_enddateAttr.setSubmitMode("always");
+        }
+    },
+
+    GetCurrentEnrollmentStatus: function () {
+
+        var enrollmentId = Xrm.Page.data.entity.getId();
+        var enrollmentFilter = "?$select=evo_EnrollmentStatus&$filter=evo_enrollmentId eq guid'" + enrollmentId + "'";
+        AWE.Evolution.WebResources.Global.retrieveMultiple("evo_enrollmentSet", enrollmentFilter,
+                        AWE.Evolution.WebResources.getCurrentEnrollmentStatusSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+
+    },
+
+    GetParentEnrollmentDates: function () {
+
+        var parentEnrollmentAttr = Xrm.Page.getAttribute("evo_peenrollmentid");
+        if (parentEnrollmentAttr.getValue() !== null && parentEnrollmentAttr.getValue() !== '' && parentEnrollmentAttr.getValue()[0].id !== null) {
+
+            var enrollmentFilter = "?$select=evo_EligibleDate,evo_EndDate,evo_EnrollmentDate&$filter=evo_enrollmentId eq guid'" + parentEnrollmentAttr.getValue()[0].id + "'";
+
+            AWE.Evolution.WebResources.Global.retrieveMultiple("evo_enrollmentSet", enrollmentFilter,
+                        AWE.Evolution.WebResources.getParentEnrollmentDatesSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+        else {
+            parentEnrollment = null;
+        }
+    },
+    InitFields: function () {
+        // Form field Control references
+        var evo_enrollmentdateControl = Xrm.Page.getControl("evo_enrollmentdate");
+
+        // Form field Attribute references
+        var evo_enrollmentdateAttr = Xrm.Page.getAttribute("evo_enrollmentdate");
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+        var evo_enrollmentstatreasonidAttr = Xrm.Page.getAttribute("evo_enrollmentstatreasonid");
+        var evo_ordersourceAttr = Xrm.Page.getAttribute("evo_ordersource");
+        var evo_taxAttr = Xrm.Page.getAttribute("evo_tax");
+        var evo_programAttr = Xrm.Page.getAttribute("evo_programid");
+
+        var formType = Xrm.Page.ui.getFormType();
+
+        switch (formType) {
+            case CREATE_MODE:
+
+                evo_taxAttr.setValue(0);
+
+
+
+                if (evo_enrollmentdateAttr != null && evo_enrollmentdateAttr.getValue() == null) {
+                    evo_enrollmentdateAttr.setValue(new Date());
+                }
+
+                evo_enrollmentstatusAttr.setValue(ENROLLMENT_STATUS_ACTIVE);
+                evo_ordersourceAttr.setValue(ENROLLMENT_ORDER_SOURCE_PHONE);
+                AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+
+
+                //Setting default to "New" when it is a new enrollment
+                if (evo_enrollmentstatreasonidAttr === null || evo_enrollmentstatreasonidAttr.getValue() === null) {
+                    var targetEnrollmentStatusReason = "New";
+                    var targetEnrollmentStatusReasonNameNotFoundMsg =
+                        AWE.Evolution.WebResources.evo_enrollment.Messages.missingEnrollmentStatusReasonFormat
+                        .replace(/\{0\}/g, targetEnrollmentStatusReason);
+
+                    var filter = "?$top=1&$filter=evo_name eq '" + targetEnrollmentStatusReason + "'";
+
+                    AWE.Evolution.WebResources.Global.retrieveMultiple(
+                        "evo_enrollmentstatusreasonSet",
+                        filter,
+                        function (result) {
+                            if (result !== null && result !== '' && result.length > 0) {
+                                //enrollmentstatusreasonId = result[0].evo_enrollmesntstatusreasonId;
+
+                                var enrollmentStatusReasonLookup = new Array();
+                                enrollmentStatusReasonLookup[0] = new Object();
+                                enrollmentStatusReasonLookup[0].id = result[0].evo_enrollmentstatusreasonId;
+                                enrollmentStatusReasonLookup[0].name = result[0].evo_name;
+                                enrollmentStatusReasonLookup[0].entityType = "evo_enrollmentstatusreason";
+                                evo_enrollmentstatreasonidAttr.setValue(enrollmentStatusReasonLookup);
+                            }
+                            else {
+                                alert(targetEnrollmentStatusReasonNameNotFoundMsg);
+                            }
+                        },
+                        AWE.Evolution.WebResources.Global.errorCallback,
+                        true);
+                }
+
+                break;
+            case UPDATE_MODE:
+                if (evo_enrollmentdateControl != null) {
+                    //evo_enrollmentdateControl.setDisabled(true);
+                }
+                break;
+        }
+    },
+
+    SyncAndValidateSelectedContact: function () {
+
+        if (AWE.Evolution.WebResources.Global.getFormType() === CREATE_MODE) {
+
+            // Local field references
+            var evo_enrollmentdateAttr = Xrm.Page.getAttribute("evo_enrollmentdate");
+            var evo_eligibledateAttr = Xrm.Page.getAttribute("evo_eligibledate");
+            var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+            var evo_insuracecustomerAttr = Xrm.Page.getAttribute("evo_insuracecustomer");
+            var evo_locationcodeidAttr = Xrm.Page.getAttribute("evo_locationcodeid");
+            var evo_marketingcodeidAttr = Xrm.Page.getAttribute("evo_marketingcodeid");
+
+            var customerId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+            var selectedProgramId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_programid");
+
+            // Validating Contact related info.
+            if (customerId !== null && customerId !== '') {
+
+                customerId = customerId.replace('{', '').replace('}', '');
+
+                if (selectedProgramId !== null && selectedProgramId !== '') {
+                    selectedProgramId = selectedProgramId.replace('{', '').replace('}', '');
+
+                    if (AWE.Evolution.WebResources.checkForDraftEnrollment(customerId, selectedProgramId)) {
+
+                        var attributes = Xrm.Page.data.entity.attributes.get();
+                        for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+                        alert(AWE.Evolution.WebResources.evo_enrollment.Messages.duplicateEnrollment);
+                        Xrm.Page.ui.close();
+                    }
+                }
+
+                AWE.Evolution.WebResources.Global.retrieveRecord(
+                    customerId,
+                    "ContactSet",
+                    function (result) {
+                        if (result !== '' && result !== null) {
+
+                            // Check waterbill flag.
+                            if (!result.evo_WaterBillOnOff) {
+                                alert(AWE.Evolution.WebResources.evo_enrollment.Messages.customerWaterBillShutoffMsg);
+
+                                var attributes = Xrm.Page.data.entity.attributes.get();
+                                for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+
+                                Xrm.Page.ui.close();
+                            }
+                            else if (result.evo_Delinquency) {
+                                var proceedEnrollment = confirm(AWE.Evolution.WebResources.evo_enrollment.Messages.customerDelinquentConfirmMsg)
+                                if (!proceedEnrollment) {
+                                    var attributes = Xrm.Page.data.entity.attributes.get();
+                                    for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+                                    Xrm.Page.getControl("evo_delinquent").clearNotification();
+                                    Xrm.Page.ui.close();
+                                }
+                            }
+
+                            // Initialize/Map Contact field locally
+                            evo_insuracecustomerAttr.setValue(result.evo_insurancecustomer);
+                            evo_locationcodeidAttr.setValue(null);
+
+                            if (result.evo_locationcodeid != null) {
+                                var locationValue = new Array();
+                                locationValue[0] = new Object();
+                                locationValue[0].id = result.evo_locationcodeid.Id;
+                                locationValue[0].name = result.evo_locationcodeid.Name;
+                                locationValue[0].entityType = result.evo_locationcodeid.LogicalName;
+                                evo_locationcodeidAttr.setValue(locationValue);
+                            }
+
+                            if (result.evo_marketingcodeid != null) {
+                                var marketingValue = new Array();
+                                marketingValue[0] = new Object();
+                                marketingValue[0].id = result.evo_marketingcodeid.Id;
+                                marketingValue[0].name = result.evo_marketingcodeid.Name;
+                                marketingValue[0].entityType = "evo_marketingcode";
+                                evo_marketingcodeidAttr.setValue(marketingValue);
+                            }
+
+                            // Calculate Enrollment Dates
+                            AWE.Evolution.WebResources.evo_enrollment.CalculateEnrollmentDates();
+                        }
+                    },
+                    AWE.Evolution.WebResources.Global.errorCallback,
+                    false);
+            }
+        }
+    },
+    ValidateCancellationDate: function () {
+        // Form field Attribute references
+        var evo_cancellationdateAttr = Xrm.Page.getAttribute("evo_cancellationdate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED &&
+            evo_enddateAttr != null && evo_enddateAttr.getValue() !== null && evo_cancellationdateAttr != null && evo_cancellationdateAttr.getValue() !== null) {
+            if (evo_enddateAttr.getValue() < evo_cancellationdateAttr.getValue()) {
+                alert("Cancellation Date cannot be greater than Enrollment End Date.");
+                evo_cancellationdateAttr.setValue(null);
+                return false;
+            }
+        }
+        return true;
+    },
+    ValidateCancellationRequestedDate: function () {
+        // Form field Attribute references
+        var evo_cancellationrequesteddateAttr = Xrm.Page.getAttribute("evo_cancellationrequesteddate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED &&
+            evo_enddateAttr != null && evo_enddateAttr.getValue() !== null && evo_cancellationrequesteddateAttr != null && evo_cancellationrequesteddateAttr.getValue() !== null) {
+            if (evo_enddateAttr.getValue() < evo_cancellationrequesteddateAttr.getValue()) {
+                alert("Cancellation Requested Date cannot be greater than Enrollment End Date.");
+                evo_cancellationrequesteddateAttr.setValue(null);
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+AWE.Evolution.WebResources.getParentEnrollmentDatesSuccess = function (result) {
+    if (typeof (result) !== 'undefined' && result != null && result != "" && result.length > 0) {
+
+        if (result[0].evo_EndDate !== null && result[0].evo_EndDate !== '') {
+
+            parentEnrollment = result[0];
+        }
+        else {
+            alert("Parent Enrollment does not have End Date.");
+        }
+
+    }
+    else {
+        alert("Error in retrieving Parent Enrollment Dates.");
+    }
+};
+
+AWE.Evolution.WebResources.getCurrentEnrollmentStatusSuccess = function (result) {
+    if (typeof (result) !== 'undefined' && result != null && result != "" && result.length > 0) {
+
+        if (result[0].evo_EnrollmentStatus !== null && result[0].evo_EnrollmentStatus !== '') {
+
+            currentEnrollment = result[0];
+        }
+    }
+};
+
+//Succes method for retrieving TnCExceptions related to LocationCode.
+AWE.Evolution.WebResources.getTnCExceptionsSuccess = function (result) {
+    if (result != null && result != "" && result.length > 0 && result[0].evo_TnCExceptions !== null) {
+        TnCExceptionsCheck = result[0].evo_TnCExceptions;
+    }
+};
+
+//ENT003 -  Calc. Enrollment Price
+AWE.Evolution.WebResources.getMarketingCodeDetails = function () {
+    if ((Xrm.Page.ui.getFormType() === CREATE_MODE) || (Xrm.Page.ui.getFormType() === UPDATE_MODE)) {
+
+        //Defect 24192 - If Enrollment Status Reason is "Same Day Cancellation", then enrollment price, subtotal will not be copied from marketing code.
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid") !== null
+            && AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid")[0].name === ENROLLMENT_STATUS_REASON_SAMEDAYCANCELLATION) {
+
+            return;
+        }
+
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid") !== null) {
+
+            marketingcodeId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id;
+
+            if (marketingcodeId !== "")
+                marketingcodeId = marketingcodeId.replace('{', '').replace('}', '');
+            AWE.Evolution.WebResources.Global.retrieveRecord(marketingcodeId, "evo_marketingcodeSet",
+                AWE.Evolution.WebResources.getMarketingCodeDetailsSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+    }
+};
+
+//ENT003 -  Calc. Enrollment Price - getMarketingCodeDetails Success Complete
+AWE.Evolution.WebResources.getMarketingCodeDetailsSuccess = function (result) {
+    if (result !== null) {
+
+        var enrollmentPrice = 0;
+        var annualPrice = 0;
+        var monthlyPrice = 0;
+        var quarterlyprice = 0;
+        var bimonthlyprice = 0;
+        var cueditAmount = 0;
+        var subtotal = 0;
+        var tax = 0;
+        var total = 0;
+
+        // Setting Annual price on Enrollment from Marketing Code
+        if (result.evo_AnnualPrice !== null && result.evo_AnnualPrice.Value !== null) {
+            annualPrice = parseFloat(result.evo_AnnualPrice.Value);
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_annualprice", annualPrice);
+        }
+        // Setting Monthly price on Enrollment from Marketing Code
+        if (result.evo_MonthlyPrice !== null && result.evo_MonthlyPrice.Value !== null) {
+            var monthlyPrice = parseFloat(result.evo_MonthlyPrice.Value);
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_monthlyprice", monthlyPrice);
+
+            // Setting Quarterly Price
+            quarterlyprice = 3 * parseFloat(result.evo_MonthlyPrice.Value);
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_quarterlyprice", quarterlyprice);
+
+            // Setting Bi-Monthly Price
+            bimonthlyprice = 2 * parseFloat(result.evo_MonthlyPrice.Value);
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_bimonthlyprice", bimonthlyprice);
+        }
+
+
+        // Setting Enrollment Prices as per the Payment Frequency
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentfrequency") !== null) {
+            var paymentFrequency = AWE.Evolution.WebResources.Global.fieldGetText("evo_paymentfrequency");
+            if (paymentFrequency !== null) {
+                switch (paymentFrequency) {
+                    case PAYMENT_FREQUENCY_ANNUALLY:
+                        enrollmentPrice = annualPrice;
+                        break;
+                    case PAYMENT_FREQUENCY_MONTHLY:
+                        enrollmentPrice = monthlyPrice;
+                        break;
+                    case PAYMENT_FREQUENCY_QUARTERLY:
+                        enrollmentPrice = quarterlyprice;
+                        break;
+                    case PAYMENT_FREQUENCY_BIMONTHLY:
+                        enrollmentPrice = bimonthlyprice;
+                        break;
+                }
+            }
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_enrollmentprice", enrollmentPrice);
+
+            creditAmount = AWE.Evolution.WebResources.Global.fieldGetValue('evo_creditamount');
+
+            // Modified Date :  01/27/2016
+            // Defect : 23806 - When'RefundAmount' contains positive value then add Credit amount with enrollment price and set into totalprice. 
+            // if 'RefundAmount' contains negative value then minus with enrollment price and set into totalprice.
+            if (creditAmount >= 0)
+                subtotal = enrollmentPrice + creditAmount;
+            else if (creditAmount < 0)
+                subtotal = enrollmentPrice - Math.abs(creditAmount);
+
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_subtotal", subtotal);
+            Xrm.Page.getAttribute("evo_subtotal").fireOnChange();
+            // Getting Tax value from Enrolment form
+            if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_tax") !== null) {
+                tax = AWE.Evolution.WebResources.Global.fieldGetValue("evo_tax");
+            }
+
+            total = subtotal + tax;
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_total", total);
+        }
+    }
+};
+// This method is used to set default fields to the new enrollment form which is opened as RE-Enroll
+AWE.Evolution.WebResources.setDefaultFieldsOnReenrollment = function (context) {
+
+    //defect 22247 - do not set payment method on reenrollment - override the relationship mapping
+    AWE.Evolution.WebResources.Global.fieldSetValue("evo_paymentmethod", null);
+
+
+    var parameters = Xrm.Page.context.getQueryStringParameters();
+    if (Xrm.Page.ui.getFormType() === CREATE_MODE && parameters !== null && typeof (parameters.evo_contactid) !== "undefined") {
+        var contactId = parameters.evo_contactid.replace('{', '').replace('}', '');
+        if (contactId !== null) {
+            AWE.Evolution.WebResources.Global.retrieveRecord(contactId, "ContactSet", AWE.Evolution.WebResources.setDefaultFieldsOnReenrollmentSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+            Xrm.Page.getAttribute("evo_enrollmentdate").setValue(new Date());
+            //This function is added but will work when the Created By field is unlocked on the form
+            AWE.Evolution.WebResources.setCurrentUser();
+        }
+    }
+};
+
+// Success method for Contact data retreival.
+AWE.Evolution.WebResources.setDefaultFieldsOnReenrollmentSuccess = function (result) {
+    var marketingId;
+    if (result !== null && result !== '') {
+
+        // setting  Marketing Code field retreived from the contact.
+        //defect 2212 - MarketingCode should not default on re-enroll. Commenting out this code
+        //if (result.evo_marketingcodeid !== null && result.evo_marketingcodeid.Id !== null) {
+        //    var marketingValue = new Array();
+        //    marketingValue[0] = new Object();
+        //    marketingValue[0].id = result.evo_marketingcodeid.Id;
+        //    marketingValue[0].name = result.evo_marketingcodeid.Name;
+        //    marketingValue[0].entityType = "evo_marketingcode";
+        //    Xrm.Page.getAttribute("evo_marketingcodeid").setValue(marketingValue);
+        //    marketingId = result.evo_marketingcodeid.Id.replace('{', '').replace('}', '');
+        //    AWE.Evolution.WebResources.Global.retrieveRecord(marketingId, "evo_marketingcodeSet", AWE.Evolution.WebResources.getMarketingIdSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        //}
+        // Setting Location Code field value retreived from the contact.
+        if (result.evo_locationcodeid !== null && result.evo_locationcodeid.Id !== null) {
+            var locationValue = new Array();
+            locationValue[0] = new Object();
+            locationValue[0].id = result.evo_locationcodeid.Id;
+            locationValue[0].name = result.evo_locationcodeid.Name;
+            locationValue[0].entityType = "evo_locationcode";
+            Xrm.Page.getAttribute("evo_locationcodeid").setValue(locationValue);
+        }
+    }
+}
+
+//This function will be called on click of REENROLL button
+AWE.Evolution.WebResources.openEnrollmentFormOnReenroll = function () {
+    //Defect 29776
+    var customerId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+    AWE.Evolution.WebResources.Global.retrieveRecord(
+                customerId,
+                "ContactSet",
+                function (result) {
+                    if (result !== '' && result !== null) {
+                        // Check waterbill flag.
+                        if (!result.evo_WaterBillOnOff) {
+
+                            alert(AWE.Evolution.WebResources.evo_enrollment.Messages.customerWaterBillShutoffMsg);
+                            var attributes = Xrm.Page.data.entity.attributes.get();
+                            for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+                            Xrm.Page.ui.close();
+
+                        }
+                        else if (result.evo_WaterBillOnOff) {
+                            var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+
+                            if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED
+                                && AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid") !== null &&
+                                AWE.Evolution.WebResources.Global.getLookupName("evo_enrollmentstatreasonid") === "Saved") {
+
+                                reEnrollEnrollmentStatusReason = "Re-enrollment - Saved";
+                            }
+                            else
+                                reEnrollEnrollmentStatusReason = "Re-enrollment";
+
+                            var targetEnrollmentStatusReasonErrorMsg =
+                                AWE.Evolution.WebResources.evo_enrollment.Messages.missingEnrollmentStatusReasonFormat
+                                .replace(/\{0\}/g, reEnrollEnrollmentStatusReason);
+
+                            AWE.Evolution.WebResources.Global.retrieveMultiple(
+                                "evo_enrollmentstatusreasonSet",
+                                "?$top=1&$filter=evo_name eq '" + reEnrollEnrollmentStatusReason + "'",
+                                AWE.Evolution.WebResources.getEnrollmentStatusReasonForReenrollmentSuccess,
+                                AWE.Evolution.WebResources.Global.errorCallback,
+                                true);
+                        }
+                    }
+                },
+                    AWE.Evolution.WebResources.Global.errorCallback,
+                    false);
+
+};
+
+// Success method for retrieving Enrollment Status Reason value and assign to the Enrollment Status Reason Lookup field after clicking the Re-enroll button
+AWE.Evolution.WebResources.getEnrollmentStatusReasonForReenrollmentSuccess = function (result) {
+
+    if (result !== null && result.length > 0) {
+        Xrm.Page.data.entity.save();
+
+        //reEnrollment
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") != AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED) {
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_enrollmentstatus", AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED);
+        }
+
+        var currentDate = new Date();
+        var eligibleDate = new Date();
+        var tempEndDate = new Date();
+
+        // Defect: 23609 - Re-Enroll enrollment leap year calculation
+        var endDate = AWE.Evolution.WebResources.EndDateCalculation(tempEndDate, true);
+
+        //Following code is copy the values from Parent Enrollment to Child Enrollment. Others values are copied using 1:N relationship maping between Parent Enrollment and Child Enrollment.
+        var parameters = {};
+        parameters["_CreateFromId"] = Xrm.Page.data.entity.getId();
+        parameters["_CreateFromType"] = Xrm.Page.context.getQueryStringParameters().etc;
+        parameters["evo_enrollmentstatus"] = AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.ACTIVE;
+        parameters["evo_peenrollmentid"] = AWE.Evolution.WebResources.Global.getGuid();
+        parameters["evo_peenrollmentidname"] = AWE.Evolution.WebResources.Global.fieldGetValue('evo_name');
+
+        parameters["evo_enrollmentdate"] = AWE.Evolution.WebResources.Global.FormatDate(currentDate.toDateString());
+        parameters["evo_eligibledate"] = AWE.Evolution.WebResources.Global.FormatDate(eligibleDate.toDateString());
+
+        parameters["evo_enrollmentstatreasonid"] = result[0].evo_enrollmentstatusreasonId;
+        parameters["evo_enrollmentstatreasonidname"] = result[0].evo_name;
+
+        parameters["evo_enddate"] = AWE.Evolution.WebResources.Global.FormatDate(endDate.toDateString());
+
+        //Defect 22148:Test Case 17288 - Step 15.1 - Credit Amount not populated from previous enrollment
+        //parameters["evo_creditamount"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_refundamount") == null ? 0 : AWE.Evolution.WebResources.Global.fieldGetValue("evo_refundamount");
+        //Defect 23710:Test Case 17288 - Re-enrollment applied credit when not requested. Check for Refund amount and Refund Type.
+        //If the Refund type is of Credit then assign positive or negative Refund Amount to Credit Amount else assign 0
+        parameters["evo_creditamount"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_refundamount") != null &&
+                                         AWE.Evolution.WebResources.Global.getOptionSetValue("evo_refundtype") == REFUNDTYPE_CREDIT ? AWE.Evolution.WebResources.Global.fieldGetValue("evo_refundamount") : 0;
+
+        Xrm.Utility.openEntityForm('evo_enrollment', null, parameters);
+    }
+    else
+        alert(targetEnrollmentStatusReasonErrorMsg);
+
+};
+
+//This function will be called on click of Renew button
+AWE.Evolution.WebResources.openEnrollmentFormOnRenew = function () {
+
+    renewalMarketingCodeId = "";
+    renewalMarketingCodeName = "";
+    marketingCodeMonthlyPrice = "";
+    marktingCodeAnnualPrice = "";
+    var enrollmentStatusReason = "Renewal";
+    var enrollmentEligibleDate = "";
+    var currentEnrollmentDate = "";
+
+    if (Xrm.Page.ui.getFormType() === CREATE_MODE) {
+        alert("Please save the record.")
+        return;
+    }
+    var currentEnrollmentId = Xrm.Page.data.entity.getId();
+
+    var parentEnrollmentDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentdate");
+    var parentEnrollmentEndDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enddate");
+    var rpiOptOut = AWE.Evolution.WebResources.Global.fieldGetValue("evo_rpioptout");
+
+    // Defect 23715:AdHoc - Auto Renew Field on enrollment is not atomatically populating 
+    // Date : 02/16/2016 - On Renewal set AutoRenew field value according to PaymentMethod field and populate from parent enrollment
+    var evo_paymentMethod = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+    var evo_autoRenew = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_autorenew");
+
+    //Defect 22324 - No fields on the current active enrollment should be changed.
+    //Below piece of code is to update the Enrollment Record with enrollment Status to Closed and Enrollment Status Reason to Renewal.
+    //Xrm.Page.getAttribute("evo_enrollmentstatus").setValue(ENROLLMENT_STATUS_CLOSED);
+    AWE.Evolution.WebResources.Global.retrieveMultiple("evo_enrollmentstatusreasonSet", "?$top=1&$filter=evo_name eq '" + enrollmentStatusReason + "'", AWE.Evolution.WebResources.getEnrollmentStatusReasonIdSuccess, AWE.Evolution.WebResources.Global.errorCallback, false)
+    //Xrm.Page.data.entity.save();
+
+    //Setting Enrollment Date = Parent Enrollment End Date  + 1 day
+    if (parentEnrollmentEndDate !== null) {
+        currentEnrollmentDate = parentEnrollmentEndDate;
+        currentEnrollmentDate.setDate(parentEnrollmentEndDate.getDate() + 1);
+
+        enrollmentEligibleDate = currentEnrollmentDate;
+    }
+
+    // Defect 24715 - Validating if enrollment is already renewed. If so then enrollment can not be renewed again.
+    if (AWE.Evolution.WebResources.IsEnrollmentAlreadyRenewed(currentEnrollmentDate, renewalEnrollmentStatusReasonId, currentEnrollmentId)) {
+        alert("This enrollment is already renewed.");
+        return;
+    }
+    //Following code is to copy the values from Parent Enrollment to Child Enrollment. Others values are copied using 1:N relationship maping between Parent Enrollment and Child Enrollment.
+    var parameters = {};
+    parameters["_CreateFromId"] = Xrm.Page.data.entity.getId();
+    parameters["_CreateFromType"] = Xrm.Page.context.getQueryStringParameters().etc;
+
+    //Setting customer from parent enrollment
+    parameters["evo_contactid"] = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+    parameters["evo_contactidname"] = AWE.Evolution.WebResources.Global.getLookupName("evo_contactid");
+    parameters["evo_enrollmentdate"] = AWE.Evolution.WebResources.Global.FormatDate(currentEnrollmentDate.toDateString());
+
+    // Setting Eligible Date  = Enrollment Date 
+    // End date = (Enrollment Date + 1 year) - 1 day
+    if (currentEnrollmentDate) {
+        parameters["evo_eligibledate"] = AWE.Evolution.WebResources.Global.FormatDate(enrollmentEligibleDate.toDateString());
+
+        // Defect:23609 - Renewal enrollment leap year calculation.
+        var currentEndDate = AWE.Evolution.WebResources.EndDateCalculation(currentEnrollmentDate, true);
+
+        parameters["evo_enddate"] = AWE.Evolution.WebResources.Global.FormatDate(currentEndDate.toDateString());
+    }
+
+    // Setting Enrollment Status
+    parameters["evo_enrollmentstatus"] = ENROLLMENT_STATUS_ACTIVE;
+
+    // Setting Program
+    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_programid") !== null) {
+        parameters["evo_programid"] = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_programid");
+        parameters["evo_programidname"] = AWE.Evolution.WebResources.Global.getLookupName("evo_programid");
+    }
+
+    // Setting Parent Enrollment
+    parameters["evo_peenrollmentid"] = AWE.Evolution.WebResources.Global.getGuid();
+    parameters["evo_peenrollmentidname"] = AWE.Evolution.WebResources.Global.fieldGetValue('evo_name');
+
+    //Set Enrollment Status Reason
+    if (renewalEnrollmentStatusReasonId !== "" && renewalEnrollmentStatusReasonName !== "") {
+        parameters["evo_enrollmentstatreasonid"] = renewalEnrollmentStatusReasonId;
+        parameters["evo_enrollmentstatreasonidname"] = renewalEnrollmentStatusReasonName;
+    }
+
+    // Defect : 23715
+    if (evo_paymentMethod !== null && typeof evo_paymentMethod !== "undefined") {
+        parameters["evo_paymentmethod"] = evo_paymentMethod;
+
+        if (evo_autoRenew !== null && typeof evo_autoRenew !== "undefined") {
+            parameters["evo_autorenew"] = evo_autoRenew;
+        }
+        else {
+            switch (evo_paymentMethod) {
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL:
+                    parameters["evo_autorenew"] = AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_WaterBill;
+                    break;
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CREDIT_CARD:
+                    parameters["evo_autorenew"] = AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_CREDIT_CARD;
+                    break;
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.ACH:
+                    parameters["evo_autorenew"] = AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_ACH;
+                    break;
+            }
+        }
+    }
+
+    //Defect 23172 Removed validation of "Do Not AutoRenew". Now it will not check "Do Not Auto Renew" option for Auto Renew field.
+    //Defect - 23174 - If RPI Opt Out is 'YES' then marketingCode Pre-populate with parent marketingCode.
+    //Otherwise Pre-populate with Replacement Code
+    if (rpiOptOut) {
+        parameters["evo_marketingcodeid"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id;
+        parameters["evo_marketingcodeidname"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].name;
+    }
+    else {
+        AWE.Evolution.WebResources.getMartketingCodeAndMonthlyPriceforRenewal();
+        // Defect 23172 : RPI - need to eliminate ""evo_enrollmenttype" as a parameter in the workflow
+        AWE.Evolution.WebResources.getMarketingListForMarketingCode(AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id);
+        AWE.Evolution.WebResources.getMarketingListForCustomer(collectionMarketinglist, AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid"));
+        AWE.Evolution.WebResources.getFilteredMarketingListForCustomer(renewalMarketinglist);
+
+        //If Replacement Marketing code is available for Marketing code then Renew Enrollment will have New Marketing code 
+        //along with Monthy Price else It carry forward the same marketing code and monthly price from parent enrollment
+
+        if (filteredRenewalMarketinglist != null & filteredRenewalMarketinglist.length > 0) {
+            //Remove default marketing code - Defect 22821 - obsolete this time
+            parameters["evo_marketingcodeid"] = renewalMarketingCodeId;
+            parameters["evo_marketingcodeidname"] = renewalMarketingCodeName;
+        }
+        else {
+            parameters["evo_marketingcodeid"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id;
+            parameters["evo_marketingcodeidname"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].name;
+            //parameters["evo_monthlyprice"] = marketingCodeMonthlyPrice;
+            //parameters["evo_annualprice"] = marktingCodeAnnualPrice;
+        }
+    }
+
+    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentfrequency") !== null) {
+        parameters["evo_paymentfrequency"] = AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentfrequency");
+    }
+
+    Xrm.Utility.openEntityForm('evo_enrollment', null, parameters);
+};
+
+//Function to validate whether the enrollment is already renewed.
+//Filter Criteria : 
+// Enrollment Status Reason == Renewal and Enrollment Status == Active and Parent Enrollment == current enrollment and Enrollment Date == Current Enrollment Date + 1 day
+AWE.Evolution.WebResources.IsEnrollmentAlreadyRenewed = function (parentEnrollmentEndDate, renewalEnrollmentStatusReasonId, currentEnrollmentId) {
+
+    var IsEnrollmentAlreadyRenewed = false;
+
+
+    var renewalEnrollmentfilter = "?$filter=evo_EnrollmentStatus/Value eq 2 and evo_EnrollmentDate ge datetime'" + AWE.Evolution.WebResources.Global.filterFormatDate(parentEnrollmentEndDate) + "T00:00:00'";
+    renewalEnrollmentfilter += " and evo_EnrollmentDate le datetime'" + AWE.Evolution.WebResources.Global.filterFormatDate(parentEnrollmentEndDate) + "T23:59:59'";
+    renewalEnrollmentfilter += " and evo_enrollmentstatreasonid/Id eq guid'" + renewalEnrollmentStatusReasonId + "'";
+    renewalEnrollmentfilter += "and evo_peenrollmentid/Id eq guid'" + currentEnrollmentId + "'";
+
+    AWE.Evolution.WebResources.Global.retrieveMultiple("evo_enrollmentSet", renewalEnrollmentfilter,
+                       function (result) {
+                           if (result !== null && result.length > 0)
+                               IsEnrollmentAlreadyRenewed = true;
+
+                       }, AWE.Evolution.WebResources.Global.errorCallback, false);
+
+    return IsEnrollmentAlreadyRenewed;
+
+};
+
+AWE.Evolution.WebResources.getMarketingListForMarketingCode = function (MarketingCodeId) {
+
+    if (MarketingCodeId) {
+        var AllMarketingListFilter = "?$select=evo_marketingcodeid,listid&$filter=evo_marketingcodeid eq guid'" + MarketingCodeId + "'";
+
+        // Retrieve all Static Marketing List where Customer is available
+        AWE.Evolution.WebResources.Global.retrieveMultiple("evo_list_marketingcodeSet", AllMarketingListFilter,
+                        AWE.Evolution.WebResources.getMarketingListForMarketingCodeSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+
+    }
+};
+
+AWE.Evolution.WebResources.getMarketingListForMarketingCodeSuccess = function (result) {
+
+    if (result !== null && result.length > 0) {
+        collectionMarketinglist = result;
+    }
+};
+
+AWE.Evolution.WebResources.getMarketingListForCustomer = function (collectionMarketinglist, CustomerID) {
+
+    if (collectionMarketinglist && CustomerID) {
+
+        for (var counter = 0; counter < collectionMarketinglist.length; counter++) {
+            var MarketingListMemberFilter = "?$select=EntityId,ListId&$filter=EntityId/Id eq guid'" + CustomerID + "' and ListId/Id eq guid'" + collectionMarketinglist[counter].listid + "'";
+
+            // Retrieve all Static Marketing List where Customer is available
+            AWE.Evolution.WebResources.Global.retrieveMultiple("ListMemberSet", MarketingListMemberFilter,
+                            AWE.Evolution.WebResources.getMarketingListForCustomerSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+    }
+};
+
+AWE.Evolution.WebResources.getMarketingListForCustomerSuccess = function (result) {
+
+    if (result !== null && result.length > 0) {
+        renewalMarketinglist[collectionindex] = result[0];
+        collectionindex++;
+
+    }
+};
+
+// 03/09/2016 Defect 23172 - Changed to Expiration Date >= today instead of within 60 days
+AWE.Evolution.WebResources.getFilteredMarketingListForCustomer = function (renewalMarketinglist) {
+    var CurrentDatetime = new Date();
+    //CurrentDatetime.setDate(CurrentDatetime.getDate() + 60);
+
+    if (renewalMarketinglist) {
+
+        for (var counter = 0; counter < renewalMarketinglist.length; counter++) {
+            var MarketingListFilter = "?$select=evo_ExpirationDate,evo_PriceIncrease&$filter=ListId eq guid'"
+                + renewalMarketinglist[counter].ListId.Id + "' and evo_PriceIncrease eq true"
+                + " and evo_ExpirationDate ge datetime'"
+                + AWE.Evolution.WebResources.Global.filterFormatDate(CurrentDatetime) + "T00:00:00'";
+
+            // Retrieve all Static Marketing List where Customer is available
+            AWE.Evolution.WebResources.Global.retrieveMultiple("ListSet", MarketingListFilter,
+                            AWE.Evolution.WebResources.getFilteredMarketingListForCustomerSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+    }
+};
+
+AWE.Evolution.WebResources.getFilteredMarketingListForCustomerSuccess = function (result) {
+
+    if (result !== null && result.length > 0) {
+        filteredRenewalMarketinglist[filteredcollectionindex] = result[0];
+        filteredcollectionindex++;
+
+    }
+};
+
+
+// Success method for retreiving Enrollment Status Reason value and assign to the Enrollment Status Reason Lookup field after clicking the Renewal button
+AWE.Evolution.WebResources.getEnrollmentStatusReasonIdSuccess = function (result) {
+
+    if (result !== null && result.length > 0) {
+
+        renewalEnrollmentStatusReasonId = result[0].evo_enrollmentstatusreasonId;
+        renewalEnrollmentStatusReasonName = result[0].evo_name;
+    }
+};
+
+// Method to retrieve the Marketing code and Monthly Price on click of RENEW button
+AWE.Evolution.WebResources.getMartketingCodeAndMonthlyPriceforRenewal = function () {
+    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid") !== null) {
+        var marketingcodeId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id;
+        AWE.Evolution.WebResources.Global.retrieveRecord(marketingcodeId, "evo_marketingcodeSet", AWE.Evolution.WebResources.getReplacementMarketingCodeSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+    }
+};
+
+//Success method for marketing code retrieval on RENEW button click
+AWE.Evolution.WebResources.getReplacementMarketingCodeSuccess = function (result) {
+    if (result !== null) {
+
+        //Fetching the Replacement Code associated with the Marketing code retreived and if replacement code is present then it will fetch the Monthly Price and Annual Price of marketing code associated with the marketing code.
+        if (result.evo_ReplacementCode !== null && result.evo_ReplacementCode.Id !== null) {
+
+            //Retrieve Marketing code of the Replacement Code 
+            AWE.Evolution.WebResources.Global.retrieveRecord(result.evo_ReplacementCode.Id, "evo_marketingcodeSet", AWE.Evolution.WebResources.getMarketingIdSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+
+        }
+        else {
+            //If replacement code is not present then it will assign Monthly Price and Annual Price from the marketing code which is retrieved.
+            renewalMarketingCodeId = result.evo_marketingcodeId;
+            renewalMarketingCodeName = result.evo_name;
+            marketingCodeMonthlyPrice = result.evo_MonthlyPrice.Value;
+            marktingCodeAnnualPrice = result.evo_AnnualPrice.Value;
+        }
+
+
+    }
+};
+// Success method for  the retreival of the marketing code associated with the replacement code.
+AWE.Evolution.WebResources.getMarketingIdSuccess = function (result) {
+    if (result !== null) {
+
+        //Assign Monthly Price and Annual Price from the marketing code which is retrieved.
+        if (result.marketingcodeId !== null) {
+
+            renewalMarketingCodeId = result.evo_marketingcodeId;
+            renewalMarketingCodeName = result.evo_name;
+            marketingCodeMonthlyPrice = result.evo_MonthlyPrice.Value;
+            marktingCodeAnnualPrice = result.evo_AnnualPrice.Value;
+        }
+    }
+};
+// This function is used to validate marketingcode  status before saving the enrollment record
+AWE.Evolution.WebResources.ValidateMarketingCodeStatus = function (marketingcodeId) {
+    AWE.Evolution.WebResources.Global.retrieveRecord(marketingcodeId, "evo_marketingcodeSet",
+                    AWE.Evolution.WebResources.ValidateMarketingCodeStatusSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+};
+//Success method for the validation of MarketingCode Status
+AWE.Evolution.WebResources.ValidateMarketingCodeStatusSuccess = function (result) {
+    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid") !== null)
+        var enrollmentStatusreasonId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid")[0].name;
+    if (result !== null) {
+        if (result.evo_MarketingCodeStatus !== null && result.evo_MarketingCodeStatus !== '') {
+            switch (result.evo_MarketingCodeStatus.Value) {
+
+                case MARKETINGCODESTATUS_ACTIVE:
+                    break;
+                case MARKETINGCODESTATUS_EXPIRED:
+                    if (enrollmentStatusreasonId != ENROLLMENT_STATUS_REASON_RENEWAL) {
+                        MARKETINGCODESTATUS_VALIDATION_FAILED = true;
+                        MARKETINGCODESTATUS_VALIDATION_ERROR_MSG = AWE.Evolution.WebResources.evo_enrollment.Messages.onlyRenewalEnrollmentsAllowedForExpiredMarketingCode;
+                    }
+                    break;
+                case MARKETINGCODESTATUS_DEACTIVATED:
+                case MARKETINGCODESTATUS_PENDING:
+                    MARKETINGCODESTATUS_VALIDATION_FAILED = true;
+                    MARKETINGCODESTATUS_VALIDATION_ERROR_MSG = AWE.Evolution.WebResources.evo_enrollment.Messages.noEnrollmentsCreatedForPendingOrDeactivatedMarketingCode;
+                    break;
+
+
+            }
+        }
+    }
+};
+
+
+// This function is used to set the current user to "Created By" field when enrollment is created.
+AWE.Evolution.WebResources.setCurrentUser = function () {
+    var userID = Xrm.Page.context.getUserId();
+    AWE.Evolution.WebResources.Global.retrieveRecord(userID, "SystemUserSet", AWE.Evolution.WebResources.getUserNameSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+}
+
+//Success method for the retreival of the User details (systemuser) and assign it to CreatedBy field.
+AWE.Evolution.WebResources.getUserNameSuccess = function (result) {
+    if (result !== null) {
+        if (result.FullName !== null && result.FullName !== '') {
+            var userName = result.FullName;
+            var setUservalue = new Array();
+            setUservalue[0] = new Object();
+            setUservalue[0].id = Xrm.Page.context.getUserId();
+            setUservalue[0].entityType = 'systemuser';
+            setUservalue[0].name = userName;
+            Xrm.Page.getAttribute("createdby").setValue(setUservalue);
+        }
+    }
+};
+
+//5167 - ENT003 - Credit amount
+AWE.Evolution.WebResources.setCreditAmountOnReenrollment = function () {
+    //get the refund amount from Enrollment form
+    var refundAmount = Xrm.Page.getAttribute("evo_refundamount").getValue();
+
+    //Code to get the formid 
+    var items = Xrm.Page.ui.formSelector.items.get();
+    for (var i in items) {
+        var item = items[i];
+        if (item.getLabel() === "Enrollment") {
+            var enrollmentFormId = item.getId();
+        }
+    }
+
+    //define default value for Re-enrollment record
+    var parameters = {};
+    parameters["formid"] = enrollmentFormId;
+
+    if (refundAmount !== null) {
+        parameters["evo_creditamount"] = refundAmount;
+    }
+
+    Xrm.Utility.openEntityForm("evo_enrollment", null, parameters);
+};
+
+// This function will be called on click of 'Request Refund' button on Enrollment.
+// 1. Request refund amount and zero dollar date (internla billing date) from AX
+// 2. Create adjustment with the refund amount
+AWE.Evolution.WebResources.calculateAndRequestRefundFromAX = function (isCalculateRefundOnly) {
+    // Retrieve fields to be passed to AX
+    // Added Payment Method parameter to support ETS V3 version
+
+    //30021 //child enrollment already cancelled but parent Enrollment NOT finalized 
+    //30096 - Added this message on calculaterefund but user still be able to process the refund.
+    if (isCalculateRefundOnly)
+    {
+
+        var refundcomplete;
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+        var parentEnrollment = Xrm.Page.getAttribute("evo_peenrollmentid");
+
+        if ((evo_enrollmentstatusAttr.getValue() == 4) &&
+            (parentEnrollment.getValue() !== null && parentEnrollment.getValue() !== '' && parentEnrollment.getValue()[0].id !== null))
+        {
+            var parentEnrollmentStatus;
+            AWE.Evolution.WebResources.Global.retrieveRecord(
+                   parentEnrollment.getValue()[0].id,
+                   "evo_enrollmentSet",
+                   function (result) {
+                       if (result !== '' && result !== null) {
+                           parentEnrollmentStatus = result.evo_EnrollmentStatus;
+                           refundcomplete = result.evo_iscancellationrefundcomplete;
+                       }
+                   },
+                   AWE.Evolution.WebResources.Global.errorCallback,
+                   false);
+        }
+        if (parentEnrollmentStatus!=null && parentEnrollmentStatus!='' && parentEnrollmentStatus!='undefined') {
+        if (parentEnrollmentStatus.Value == 2 && refundcomplete != true) {
+            alert('Parent Enrollment is not Cancelled. Please cancel the parent enrollment for finalizing the cancellation.');
+        }
+        else if (parentEnrollmentStatus.Value == 4 && refundcomplete != true) {
+            alert('Parent Enrollment is not Cancelled. Please cancel the parent enrollment for finalizing the cancellation.');
+        }
+    }
+
+        }
+    
+        var enrollmentNumber = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentnumber");
+        var enrollmentStatus = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus");
+        var cancellationReason = AWE.Evolution.WebResources.Global.fieldGetValue("evo_cancellationreasonid");
+        var cancellationDTObj = AWE.Evolution.WebResources.Global.fieldGetValue("evo_cancellationrequesteddate");
+        var locationCodeId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_locationcodeid");
+        var customer = AWE.Evolution.WebResources.Global.fieldGetValue("evo_contactid");
+        var evo_paymentmethodAttr = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+        var isCancellationOption = AWE.Evolution.WebResources.Global.fieldGetValue("evo_cancellationoption");
+        var paymentMethod = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+        var paymentAuthId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_planid");
+        //var paymentAuthId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_planid");
+        var refundType = AWE.Evolution.WebResources.Global.fieldGetValue("evo_refundtype");
+        var enrollmentEndDateObj = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enddate");
+        var enrollmentStatusReasonObj = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid");
+        var enrollmentStatusReasonName = (enrollmentStatusReasonObj !== null && enrollmentStatusReasonObj !== '') ? AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid")[0].name : null;
+        var totalEnrollmentPrice = AWE.Evolution.WebResources.Global.fieldGetValue("evo_total");
+        var isRefundRequested = AWE.Evolution.WebResources.Global.fieldGetValue("evo_isrefundrequested");
+        var ETSPlanId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentplanid");
+        // Defect - 23950 : Show alert when Cancellation Requested Date is greater than End Date
+        if (!AWE.Evolution.WebResources.evo_enrollment.ValidateCancellationRequestedDate())
+            return;
+
+        //Defect# 23854 - Request Refund cannot be executed with a blank refund type for Not Water bill enrollments & for Waterbill the Request Refund should go through with a blank refund type.
+        //This condition should be bypass if Calculate Refund Button is clicked.
+        if (evo_paymentmethodAttr != AWE.Evolution.WebResources.evo_enrollment.evo_paymentmethod.WATERBILL && refundType == null && !isCalculateRefundOnly) {
+            alert("Enter Refund Type before requesting refund.");
+            return;
+        }
+
+        //Check if it is a Calculate Refund or Request Refund
+        // isCalculateRefundOnly = typeof isCalculateRefundOnly !== 'undefined' ? isCalculateRefundOnly : false;
+
+        //////////////////////////////////////////////////////////////////////////////
+        // Defect# 29389
+        // if it's request refund, check whether reund already requestd to 
+        // avoid duplicate adjustment records
+        //////////////////////////////////////////////////////////////////////////////
+        if (!isCalculateRefundOnly) {
+
+            // if (isRefundRequested != undefined && isRefundRequested != null && isRefundRequested == true) {
+            var refundcomplete; //To Fix 29511. Additional check before blocking the call to request refund Action. 
+            var enrollmentId = AWE.Evolution.WebResources.Global.getGuid();
+            AWE.Evolution.WebResources.Global.retrieveRecord(
+                   enrollmentId,
+                   "evo_enrollmentSet",
+                   function (result) {
+                       if (result !== '' && result !== null) {
+                           refundcomplete = result.evo_iscancellationrefundcomplete;
+                       }
+                   },
+                   AWE.Evolution.WebResources.Global.errorCallback,
+                   false);
+            if (refundcomplete != undefined && refundcomplete != null && refundcomplete == true) {
+                Xrm.Utility.alertDialog('The customer has requested refund already.', function () { return false; });
+                return;
+            }
+            //}
+        }
+
+        if (enrollmentNumber == null || enrollmentStatus == null || locationCodeId == null || cancellationReason == null || cancellationDTObj == null || customer == null) {
+            alert("Enter Enrollment Number, Enrollment Status, Requested Cancellation Date, Cancellation Reason, Location Code and Customer before requesting refund.");
+            return;
+        }
+
+        //Defect:28599: If the Status reason is SameDayCancellation then AX will not be called for amount calculation
+        if (isCalculateRefundOnly) {
+            var tax = 0;
+            var enrollmentPrice = 0;
+            if (enrollmentStatusReasonName === ENROLLMENT_STATUS_REASON_SAMEDAYCANCELLATION) {
+                if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_tax") !== null) {
+                    tax = AWE.Evolution.WebResources.Global.fieldGetValue("evo_tax");
+                }
+                if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentprice") !== null) {
+                    enrollmentPrice = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentprice");
+                }
+
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_total", enrollmentPrice + tax);
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_cancellationdollaramount", enrollmentPrice + tax);
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_refundamount", enrollmentPrice + tax);
+
+                return;
+            }
+        }
+
+        // Pass the parameters to the callActionRequestRefundFromAX
+        var cancellationReasonName = cancellationReason[0].name;
+
+        // Validate the cancellation date.
+        if (cancellationDTObj < 1 / 10 / 1900) {
+            alert("The cancellation date supplied is less than the the minimum value supported.")
+            return;
+        }
+
+        var cancellationDate = cancellationDTObj.toDateString();
+        var enrollmentEndDate = enrollmentEndDateObj.toDateString();
+
+        var customerId = customer[0].id;
+
+        // Validate ETS Customer ID -- for CreditCard, ACH, eCheck payments for non-calculation requests
+        if (!isCalculateRefundOnly && (evo_paymentmethodAttr == AWE.Evolution.WebResources.evo_enrollment.evo_paymentmethod.ACH
+            || evo_paymentmethodAttr == AWE.Evolution.WebResources.evo_enrollment.evo_paymentmethod.ECHECK
+            || evo_paymentmethodAttr == AWE.Evolution.WebResources.evo_enrollment.evo_paymentmethod.CREDITCARD)) {
+
+            // Validate related Payment Instrument (PaymentMethod)
+            if (paymentAuthId && ETSPlanId) {
+                _ETSPaymentInstrumentID = null;
+
+                var filter = "?$top=1&$select=evo_paymentmethods_evo_paymentauthorization/evo_ETSPaymentID"
+                    + "&$expand=evo_paymentmethods_evo_paymentauthorization"
+                    + "&$filter=evo_paymentauthorizationId eq guid'" + paymentAuthId + "'"
+                    + "and evo_FrequencyofPayment/Value ne 5";
+                AWE.Evolution.WebResources.Global.retrieveMultiple("evo_paymentauthorizationSet",
+                    filter,
+                    function (result) {
+                        if (result !== null && result.length > 0 && result[0].evo_paymentmethods_evo_paymentauthorization) {
+                            _ETSPaymentInstrumentID = result[0].evo_paymentmethods_evo_paymentauthorization.evo_ETSPaymentID;
+                        }
+
+                        if (!_ETSPaymentInstrumentID) {
+                            alert("Unable to process refund due to missing information for payment authorization record with ID: " + paymentAuthId);
+                            return;
+                        }
+                    },
+                    AWE.Evolution.WebResources.Global.errorCallback,
+                    false);
+            }
+            else {
+                if (refundType == REFUNDTYPE_CREDITCARD) {
+                    alert("Please select a different refund type.");
+                    return;
+                }
+            }
+        }
+        else if (!isCalculateRefundOnly && (evo_paymentmethodAttr == AWE.Evolution.WebResources.evo_enrollment.evo_paymentmethod.WATERBILL)) {
+            if (refundType == REFUNDTYPE_CREDITCARD) {
+                alert("Please select a different refund type.");
+                return;
+            }
+        }
+
+        // Get Location Code -- then request AX refund via evo_RequestRefund CRMAction.
+        // Added Payment Method, Payment Plan ID for ETS V3
+        AWE.Evolution.WebResources.Global.retrieveRecord(
+            locationCodeId[0].id,
+            "evo_locationcodeSet",
+            function (result) {
+                if (result !== null && result.evo_locationcodeid !== null) {
+                    var locationcodeFromResult = result.evo_Code;
+                    //Defect# 29460 - Show Loading Image
+                    Alert.showLoading('Please Wait...');
+                    setTimeout(function () {
+                        AWE.Evolution.WebResources.callActionRequestRefundFromAX(
+                        "evo_RequestRefund",
+                        true,
+                        enrollmentNumber,
+                        enrollmentStatus,
+                        locationcodeFromResult,
+                        cancellationDate,
+                        cancellationReasonName,
+                        customerId,
+                        isCalculateRefundOnly,
+                        isCancellationOption,
+                        paymentMethod,
+                        paymentAuthId,
+                        enrollmentEndDate,
+                        enrollmentStatusReasonName,
+                        totalEnrollmentPrice)
+                    }, 1000);
+
+                }
+                else {
+                    alert("Unable to process payment for the Customer : Location Code");
+                    return;
+                }
+            },
+            AWE.Evolution.WebResources.Global.errorCallback,
+            true);
+    };
+
+    // Request refund amount and zero dollar date (internal billing date) from AX
+    // Added paymentmethod, paymentPlanID, CustomerRFN to support ETS V3 function
+    AWE.Evolution.WebResources.callActionRequestRefundFromAX = function (
+        requestName,
+        refreshPage,
+        enrollmentNumber,
+        enrollmentStatus,
+        locationCode,
+        cancellationDate,
+        cancellationReason,
+        customerId,
+        isCalculateRefundOnly,
+        isCancellationOption,
+        paymentMethod,
+        paymentAuthId,
+        enrollmentEndDate,
+        enrollmentStatusReasonName,
+        totalEnrollmentPrice) {
+
+
+
+        // Creating the request XML for calling the Action
+        var requestXML = ""
+        requestXML += "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+        requestXML += "  <s:Body>";
+        requestXML += "    <Execute xmlns=\"http://schemas.microsoft.com/xrm/2011/Contracts/Services\" xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\">";
+        requestXML += "      <request xmlns:a=\"http://schemas.microsoft.com/xrm/2011/Contracts\">";
+        requestXML += "        <a:Parameters xmlns:b=\"http://schemas.datacontract.org/2004/07/System.Collections.Generic\">";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>Target</b:key>";
+        requestXML += "            <b:value i:type=\"a:EntityReference\">";
+        requestXML += "              <a:Id>" + Xrm.Page.data.entity.getId() + "</a:Id>";
+        requestXML += "              <a:LogicalName>" + Xrm.Page.data.entity.getEntityName() + "</a:LogicalName>";
+        requestXML += "              <a:Name i:nil=\"true\" />";
+        requestXML += "            </b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>EnrollmentNumber</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + enrollmentNumber + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "             <b:key>CustomerId</b:key>";
+        requestXML += "             <b:value i:type=\"a:EntityReference\">";
+        requestXML += "                 <a:Id>" + customerId + "</a:Id>";
+        requestXML += "                 <a:LogicalName>contact</a:LogicalName>";
+        requestXML += "                 <a:Name i:nil=\"true\" />";
+        requestXML += "             </b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>EnrollmentStatus</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + enrollmentStatus + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>CancellationDate</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + cancellationDate + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>CancellationReason</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + escape(cancellationReason) + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>LocationCode</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + locationCode + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>IsCalculateRefundOnly</b:key>";
+        requestXML += "            <b:value i:type=\"c:boolean\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + isCalculateRefundOnly + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>IsCancellationOption</b:key>";
+        requestXML += "            <b:value i:type=\"c:boolean\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + isCancellationOption + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>PaymentMethod</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + paymentMethod + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>EndDate</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + enrollmentEndDate + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        if (paymentAuthId) {
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>PaymentPlanId</b:key>";
+            requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + paymentAuthId + "</b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+        }
+        if (_ETSPaymentInstrumentID) {
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>ETSPaymentInstrumentID</b:key>";
+            requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + _ETSPaymentInstrumentID + "</b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+        }
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>EnrollmentStatusReasonName</b:key>";
+        requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + enrollmentStatusReasonName + "</b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "          <a:KeyValuePairOfstringanyType>";
+        requestXML += "            <b:key>TotalEnrollmentPrice</b:key>";
+        requestXML += "            <b:value i:type=\"a:Money\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">";
+        requestXML += "             <a:Value>" + totalEnrollmentPrice + "</a:Value>";
+        requestXML += "                </b:value>";
+        requestXML += "          </a:KeyValuePairOfstringanyType>";
+        requestXML += "        </a:Parameters>";
+        requestXML += "        <a:RequestId i:nil=\"true\" />";
+        requestXML += "        <a:RequestName>" + requestName + "</a:RequestName>";
+        requestXML += "      </request>";
+        requestXML += "    </Execute>";
+        requestXML += "  </s:Body>";
+        requestXML += "</s:Envelope>";
+
+        var req = new XMLHttpRequest();
+        // Defect# 29460, changed XMLRequest to SYNC. 
+        req.open("POST", AWE.Evolution.WebResources.Global.getOrganizationSvcWebUrl(), false);
+        req.setRequestHeader("Accept", "application/xml, text/xml, */*");
+        req.setRequestHeader("Content-Type", "text/xml; charset=utf-8");
+        req.setRequestHeader("SOAPAction", "http://schemas.microsoft.com/xrm/2011/Contracts/Services/IOrganizationService/Execute");
+
+
+        //refresh the page if the request was successful.
+        try {
+            req.send(requestXML);
+            if (req.status == 200) {
+
+                if (refreshPage) {
+                    AWE.Evolution.WebResources.RefreshForm()
+                }
+                else {
+                    alert(req.responseText);
+                }
+            }
+            else {
+                var message = null;
+                var traceText = null;
+                try {
+                    message = AWE.Evolution.WebResources.Global.getPluginErrorMessage(req.responseXML.getElementsByTagName("Message"));
+                    traceText = AWE.Evolution.WebResources.Global.getPluginTrace(req.responseXML.getElementsByTagName("TraceText"));
+                }
+                catch (e) {
+                }
+                if (message == null) {
+                    message = "Error executing Action. Check input parameters or contact your CRM Administrator";
+                }
+                else {
+                    Xrm.Utility.alertDialog((message + (traceText == null ? '' : ('\n\nTrace:' + traceText))), function () { return false; });
+                }
+            }
+        }
+        catch (e) { }
+        finally {
+            // hide progress dialog
+            Alert.hide();
+        }
+    };
+
+    // Task - 5354 Show button "Calculate Refund Button" on the ribbon if the enrollment status is "Cancelled", otherwise hide it.
+    AWE.Evolution.WebResources.setIsRefundRequestedFieldValue = function (value) {
+
+        if (Xrm.Page.ui.getFormType() === UPDATE_MODE) {
+
+            var enrollment = {};
+            enrollment.evo_isrefundrequested = value;
+
+            var enrollmentId = AWE.Evolution.WebResources.Global.getGuid();
+            var enrollmentEntityName = AWE.Evolution.WebResources.Global.getEntityName();
+
+            SDK.REST.updateRecord(enrollmentId, enrollment, enrollmentEntityName,
+                                  function () {
+                                      AWE.Evolution.WebResources.Global.fieldSetValue('evo_isrefundrequested', value);
+                                      AWE.Evolution.WebResources.Global.setFieldSubmitModeToNever('evo_isrefundrequested');
+                                  }, function (error) { alert(error.message); });
+        }
+        return false;
+    };
+
+    // Task - 5354 Show button "Calculate Refund Button" on the ribbon if the enrollment status is "Cancelled", otherwise hide it.
+    AWE.Evolution.WebResources.calculateRefundRibbon = function () {
+
+        if (Xrm.Page.ui.getFormType() === CREATE_MODE || Xrm.Page.ui.getFormType() === UPDATE_MODE) {
+            var enrollmentStatus = AWE.Evolution.WebResources.Global.fieldGetText("evo_enrollmentstatus");
+            if (enrollmentStatus !== null && enrollmentStatus !== "") {
+                if (enrollmentStatus === "Cancelled") {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    // Method to refresh the ribbon
+    AWE.Evolution.WebResources.calculateRefundRibbonRefresh = function () {
+        Xrm.Page.ui.refreshRibbon();
+    };
+
+    AWE.Evolution.WebResources.RefreshForm = function () {
+        //Xrm.Utility.openEntityForm(Xrm.Page.data.entity.getEntityName(), Xrm.Page.data.entity.getId());
+        Xrm.Page.data.refresh(false);
+    }
+
+    AWE.Evolution.WebResources.Isleapyear = function (_year) {
+        return ((_year % 4 == 0) && (_year % 100 != 0)) || (_year % 400 == 0);
+    }
+
+    //If the user selects Internal Billing Date the Cancellation Dollar Amount should be set to the same value as the Internal Billing Amount field. 
+    //If the user selects Requested Data the Cancellation Dollar Amount should be set to the same value as the Refund Amount field.
+    //task-19588
+
+    AWE.Evolution.WebResources.setCancellationDollarAmount = function () {
+        var cancellationoptionvalue = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_cancellationoption");
+        var amount = 0;
+        var cancellationDate;
+        var cancellationDateAttr = Xrm.Page.getAttribute("evo_cancellationdate");
+        var dollarAmountAttr = Xrm.Page.getAttribute("evo_cancellationdollaramount");
+
+        if (cancellationoptionvalue === 0) { //If the cancellation option is: "Requested Date"
+            amount = AWE.Evolution.WebResources.Global.fieldGetValue('evo_refundamount');
+            cancellationDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_cancellationrequesteddate");
+        }
+        else { //If the cancellation option is : "Internal BIlling Date" 
+            amount = AWE.Evolution.WebResources.Global.fieldGetValue('evo_internalbillingamount');
+            cancellationDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_internalbillingdate");
+        }
+        //Set the cancellation amount and cancellation date
+        AWE.Evolution.WebResources.Global.fieldSetValue("evo_cancellationdollaramount", amount);
+        AWE.Evolution.WebResources.Global.fieldSetValue("evo_cancellationdate", cancellationDate);
+
+        if (cancellationDateAttr != null) {
+            cancellationDateAttr.fireOnChange();
+            cancellationDateAttr.setSubmitMode("always");
+        }
+        if (dollarAmountAttr != null) {
+            dollarAmountAttr.setSubmitMode("always");
+        }
+    };
+    //Defect 30027
+    AWE.Evolution.WebResources.onChangeRefundAmount = function () {
+        var cancellationoptionvalue = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_cancellationoption");
+        var amount = 0;
+        var dollarAmount = AWE.Evolution.WebResources.Global.fieldGetValue('evo_cancellationdollaramount');
+        if (cancellationoptionvalue == 0) { //If the cancellation option is: "Requested Date"
+            amount = AWE.Evolution.WebResources.Global.fieldGetValue('evo_refundamount');
+            if (amount != dollarAmount) {
+                //Set the cancellation amount 
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_cancellationdollaramount", amount);
+            }
+        }
+    };
+
+   
+    // Defect 11203 -  Checking if Draft Enrollment is already present for the customer. If yes, then it will show warning message and close the UI
+    AWE.Evolution.WebResources.checkForDraftEnrollment = function (customerId, programId) {
+
+        draftEnrollmentCheck = false;
+        var filter = "?$top=1&$select=evo_enrollmentId&$filter=evo_contactid/Id eq guid'" + customerId
+            + "' and evo_EnrollmentStatus/Value eq 3 and evo_programid/Id eq guid'" + programId + "'"; //TODO: add this check for onchange event for evo_programid.
+        AWE.Evolution.WebResources.Global.retrieveMultiple("evo_enrollmentSet",
+            filter,
+            AWE.Evolution.WebResources.GetDraftEnrollmentSuccess,
+            AWE.Evolution.WebResources.Global.errorCallback,
+            false);
+
+        return draftEnrollmentCheck;
+    };
+
+    //Defect 11203 -  Success method to retrieve related enrollment/program with Status === Draft
+    AWE.Evolution.WebResources.GetDraftEnrollmentSuccess = function (result) {
+        if (result !== '' && result !== null && result.length > 0) {
+            draftEnrollmentCheck = true;
+        }
+    }
+    ///Added for task 11179 set the program code based on marketing code
+    AWE.Evolution.WebResources.getProgramOnChangeOfMarketingCodeDetails = function () {
+        var evo_programidAttr = Xrm.Page.getAttribute("evo_programid");
+
+        var marketingcodeId = null;
+        if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid") !== null)
+            marketingcodeId = AWE.Evolution.WebResources.Global.fieldGetValue("evo_marketingcodeid")[0].id;
+
+        if (marketingcodeId !== null && marketingcodeId !== "") {
+            marketingcodeId = marketingcodeId.replace('{', '').replace('}', '');
+            AWE.Evolution.WebResources.Global.retrieveRecord(marketingcodeId, "evo_marketingcodeSet",
+            function (result) {
+                if (result !== null && result.evo_programid.Id !== null) {
+                    var formProgramName = "";
+
+                    if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_programid") !== null) {
+                        formProgramName = AWE.Evolution.WebResources.Global.fieldGetValue("evo_programid")[0].name
+
+                        if (formProgramName) {
+
+                            if (formProgramName != result.evo_programid.Name) {
+                                var programIdLookup = new Array();
+                                programIdLookup[0] = new Object();
+                                programIdLookup[0].id = result.evo_programid.Id;
+                                programIdLookup[0].name = result.evo_programid.Name;
+                                programIdLookup[0].entityType = "evo_program";
+                                AWE.Evolution.WebResources.Global.fieldSetValue("evo_programid", programIdLookup);
+                                evo_programidAttr.fireOnChange();
+                            }
+
+                            if (evo_programidAttr.getValue()) {
+                                if (evo_programidAttr.getIsDirty() === false || Xrm.Page.ui.getFormType() === CREATE_MODE)
+                                    AWE.Evolution.WebResources.evo_enrollment.AdjustForNewSurgeProtectProgram();
+                            }
+                        }
+                    }
+                    else {
+                        var programIdLookup = new Array();
+                        programIdLookup[0] = new Object();
+                        programIdLookup[0].id = result.evo_programid.Id;
+                        programIdLookup[0].name = result.evo_programid.Name;
+                        programIdLookup[0].entityType = "evo_program";
+                        AWE.Evolution.WebResources.Global.fieldSetValue("evo_programid", programIdLookup);
+                        evo_programidAttr.fireOnChange();
+
+                        if (evo_programidAttr.getValue()) {
+                            if (evo_programidAttr.getIsDirty() === false || Xrm.Page.ui.getFormType() === CREATE_MODE)
+                                AWE.Evolution.WebResources.evo_enrollment.AdjustForNewSurgeProtectProgram();
+                        }
+                        else {
+                            AWE.Evolution.WebResources.Global.fieldSetValue("evo_programid", null);
+                        }
+                    }
+                }
+            }, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+        else {
+            AWE.Evolution.WebResources.Global.fieldSetValue("evo_programid", null);
+        }
+
+    };
+
+    // CR 20346:  This function will be called on "OnLoad" event of evo_enrollment form to get all the values of evo_paymentmethod field and save it in an array.
+    AWE.Evolution.WebResources.getAllPaymentMethods = function () {
+
+
+        if (Xrm.Page.getAttribute("evo_locationcodeid") !== null && Xrm.Page.getAttribute("evo_paymentmethod") !== null && Xrm.Page.getControl("evo_paymentmethod") !== null) {
+
+            SDK.Metadata.RetrieveAttribute("evo_enrollment", "evo_paymentmethod", "", true, AWE.Evolution.WebResources.getPaymentMethodSuccess, AWE.Evolution.WebResources.Global.errorCallback);
+        }
+
+    };
+
+    // Success method for retrieving all the values of Payment method
+    AWE.Evolution.WebResources.getPaymentMethodSuccess = function (result) {
+
+        if (result !== null && result !== '') {
+
+            // Retreive all options and save it to array.
+            for (var count = 0; count < result.OptionSet.Options.length; count++) {
+                var payementMethodText = result.OptionSet.Options[count].Label.LocalizedLabels[0].Label;
+                var payementMethodValue = result.OptionSet.Options[count].Value;
+
+                paymentMethodArray.push({
+                    text: payementMethodText,
+                    value: payementMethodValue
+                });
+            }
+
+            // Checking form mode and filter the optionset accordingly
+            if (Xrm.Page.ui.getFormType() === CREATE_MODE) {
+                Xrm.Page.getControl("evo_paymentmethod").clearOptions();
+                if (Xrm.Page.getControl("header_process_evo_paymentmethod") !== null && typeof (Xrm.Page.getControl("header_process_evo_paymentmethod")) !== 'undefined')
+                    Xrm.Page.getControl("header_process_evo_paymentmethod").clearOptions();
+            }
+            else {
+
+                var locationCode = AWE.Evolution.WebResources.Global.fieldGetValue("evo_locationcodeid");
+                var paymentMethod = AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentmethod");
+
+                if (locationCode !== null && locationCode !== '' && paymentMethod !== null && paymentMethod !== '') {
+                    AWE.Evolution.WebResources.filterPaymentMethodFromLocationCode();
+                    AWE.Evolution.WebResources.Global.fieldSetValue("evo_paymentmethod", paymentMethod);
+                }
+            }
+        }
+    };
+
+    // This method will be called on "OnChange" of evo_locationcode field
+    AWE.Evolution.WebResources.filterPaymentMethodFromLocationCode = function () {
+
+        if (paymentMethodArray.length > 0) {
+
+            if (Xrm.Page.getAttribute("evo_locationcodeid") !== null && Xrm.Page.getAttribute("evo_paymentmethod") !== null && Xrm.Page.getControl("evo_paymentmethod") !== null) {
+
+                var locationCodeId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_locationcodeid");
+
+                if (locationCodeId !== null && locationCodeId !== "" && typeof (locationCodeId) !== "undefined") {
+
+                    // Retrieve Payment Methods ID associated for selected Location code from N:N relationship "evo_paymentmethod_evo_locationcode"
+                    var locationCodefilter = "?$select=evo_paymentmethodid&$filter=evo_locationcodeid eq guid'" + locationCodeId + "'";
+
+                    AWE.Evolution.WebResources.Global.retrieveMultiple("evo_paymentmethod_evo_locationcodeSet", locationCodefilter,
+                                AWE.Evolution.WebResources.getPaymentMethodIdSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+                }
+            }
+        }
+    };
+
+    // Success method for retrieving associated Payment Methods to the selected Location code.
+    AWE.Evolution.WebResources.getPaymentMethodIdSuccess = function (paymentMethodResult) {
+
+        Xrm.Page.getControl("evo_paymentmethod").clearOptions();
+        if (Xrm.Page.getControl("header_process_evo_paymentmethod") !== null && typeof (Xrm.Page.getControl("header_process_evo_paymentmethod")) !== 'undefined')
+            Xrm.Page.getControl("header_process_evo_paymentmethod").clearOptions();
+
+        if (paymentMethodResult !== null && paymentMethodResult !== '' && paymentMethodResult.length > 0) {
+            for (var counter = 0; counter < paymentMethodResult.length; counter++) {
+
+                index = counter;
+                var paymentMethodFilter = "?$select=evo_name&$filter=evo_paymentmethodId eq guid'" + paymentMethodResult[counter].evo_paymentmethodid + "'";
+
+                // Retrieve Name of the Payment Method 
+                AWE.Evolution.WebResources.Global.retrieveMultiple("evo_paymentmethodSet", paymentMethodFilter,
+                            AWE.Evolution.WebResources.getPaymentMethodNameSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+
+            }
+        }
+        else {
+
+            alert("The selected Location Code does not have associated Payment Method. Either associated Payment Method to the selected Location Code or select another Location Code.");
+            Xrm.Page.getAttribute("evo_locationcodeid").setValue(null);
+            Xrm.Page.getAttribute("evo_paymentmethod").setValue(null);
+        }
+    };
+
+    // Success method for retrieving Name of Payment Method and if it is associated with Location Code then add it to the payment method optionset
+    AWE.Evolution.WebResources.getPaymentMethodNameSuccess = function (paymentMethodNameResult) {
+
+        if (paymentMethodNameResult !== null && paymentMethodNameResult !== '' && paymentMethodNameResult.length > 0) {
+
+            var paymentMethodName = paymentMethodNameResult[0].evo_name;
+            var paymentMethodArrayItem = paymentMethodArray.filter(function (paymentMethod) { return paymentMethod.text == paymentMethodName });
+            if (paymentMethodArrayItem !== null) {
+
+                var option = new Option();
+                option.text = paymentMethodArrayItem[0].text;
+                option.value = paymentMethodArrayItem[0].value;
+                Xrm.Page.getControl("evo_paymentmethod").addOption(option, index);
+                if (Xrm.Page.getControl("header_process_evo_paymentmethod") !== null && typeof (Xrm.Page.getControl("header_process_evo_paymentmethod")) !== 'undefined')
+                    Xrm.Page.getControl("header_process_evo_paymentmethod").addOption(option, index);
+
+            }
+        }
+    };
+    //CR 20160/20766 : Filtering Payment Method based on evo_waterbill flag in evo_locationcode and evo_waterbill value in evo_program
+    // Defect 21903 - evo_waterbill is now replaced with evo_wbill
+
+    var _programCodeWBValue = null;
+    var _locationCodeWBFlag = null;
+
+    AWE.Evolution.WebResources.FilterPaymentMethodOnLoad = function () {
+
+        var _paymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("evo_paymentmethod");
+        var _headerPaymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("header_process_evo_paymentmethod");
+
+        if (_paymentMethodAttr !== null) {
+
+            var paymentMethod = AWE.Evolution.WebResources.Global.fieldGetValue("evo_paymentmethod");
+
+            AWE.Evolution.WebResources.FilterPaymentMethod();
+
+            if (paymentMethod !== null && paymentMethod !== '') {
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_paymentmethod", paymentMethod);
+            }
+        }
+    };
+
+    AWE.Evolution.WebResources.FilterPaymentMethod = function () {
+
+        _locationCodeWBFlag = null;
+        _programCodeWBValue = null;
+
+        var _paymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("evo_paymentmethod");
+        var _headerPaymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("header_process_evo_paymentmethod");
+
+
+        if (_paymentMethodAttr !== null) {
+
+            if (Xrm.Page.getAttribute("evo_locationcodeid") !== null && Xrm.Page.getAttribute("evo_programid") !== null) {
+
+                _paymentMethodAttr.clearOptions();
+
+                if (_headerPaymentMethodAttr !== null) {
+                    _headerPaymentMethodAttr.clearOptions();
+                }
+                var locationCodeId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_locationcodeid");
+                var programCodeId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_programid");
+
+                // Fetching Water Bill Flag from evo_locationcode entity
+                if (locationCodeId !== null && locationCodeId !== "" && typeof (locationCodeId) !== "undefined") {
+
+                    var locationCodefilter = "?$select=evo_wbill&$filter=evo_locationcodeId eq guid'" + locationCodeId + "'";
+                    AWE.Evolution.WebResources.Global.retrieveMultiple("evo_locationcodeSet", locationCodefilter,
+                                AWE.Evolution.WebResources.GetLocationCodeWaterbillSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+                }
+
+                // Fetching Water Bill option set value from evo_program entity
+                if (programCodeId !== null && programCodeId !== "" && typeof (programCodeId) !== "undefined") {
+
+                    var programFilter = "?$select=evo_wbill&$filter=evo_programId eq guid'" + programCodeId + "'";
+                    AWE.Evolution.WebResources.Global.retrieveMultiple("evo_programSet", programFilter,
+                                AWE.Evolution.WebResources.GetProgramWaterbillSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+                }
+
+                if (_locationCodeWBFlag !== null && _programCodeWBValue !== null) {
+
+                    AWE.Evolution.WebResources.AddOptionsPaymentMethod(_locationCodeWBFlag, _programCodeWBValue);
+                }
+            }
+        }
+    };
+
+    // Function  is used to add the available options for evo_paymentmethod field
+    AWE.Evolution.WebResources.AddOptionsPaymentMethod = function (locationCodeWBFlag, programCodeWBValue) {
+
+        // Defect 23221 : AdHoc - Payment Method selection is not limited to available only
+        var marketingCodeError = false;
+        var _paymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("evo_paymentmethod");
+        var _headerPaymentMethodAttr = AWE.Evolution.WebResources.Global.getControl("header_process_evo_paymentmethod");
+
+        var paymentMethodArr = [{ text: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethodText.WATERBILL, value: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL },
+                                { text: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethodText.CREDIT_CARD, value: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CREDIT_CARD },
+                                { text: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethodText.CHECK, value: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CHECK },
+                                { text: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethodText.ACH, value: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.ACH },
+                                { text: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethodText.ECHECK, value: AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.ECHECK }, ];
+
+
+        for (var index = 0; index < paymentMethodArr.length; index++) {
+
+            var isValidOption = false;
+
+            switch (locationCodeWBFlag) {
+
+                //When Location Code's Water Bill = "Water Bill"
+                case AWE.Evolution.Schema.evo_locationcode.evo_wbill.WATERBILL:
+
+                    //When Program's Water Bill = YES
+                    if (programCodeWBValue) {
+                        isValidOption = true;
+                    }
+
+                        //When Program's Water Bill = NO
+                    else {
+
+                        //Exclude Water Bill Payment method
+                        if (paymentMethodArr[index].value !== AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL) {
+                            isValidOption = true;
+                        }
+                    }
+                    break;
+
+                    //When Location Code's Water Bill = "Water Bill Only"
+                case AWE.Evolution.Schema.evo_locationcode.evo_wbill.WATERBILLONLY:
+
+                    //When Program's Water Bill = YES
+                    if (programCodeWBValue) {
+
+                        //Include Water Bill Payment method only
+                        if (paymentMethodArr[index].value === AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL) {
+                            isValidOption = true;
+                        }
+                    }
+
+                        //When Program's Water Bill = NO
+                    else {
+
+                        //No payment method option
+                        AWE.Evolution.WebResources.Global.fieldSetValue("evo_paymentmethod", null);
+                        marketingCodeError = true;
+                        isValidOption = false;
+                    }
+                    break;
+
+                    //When Location Code's Water Bill = "NONE"
+                case AWE.Evolution.Schema.evo_locationcode.evo_wbill.NULLORNONE:
+
+                    //Exclude Water Bill Payment method
+                    if (_programCodeWBValue != null && paymentMethodArr[index].value !== AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL) {
+
+                        isValidOption = true;
+                    }
+                    break;
+
+            }
+            if (isValidOption) {
+                var option = new Option();
+                option.text = paymentMethodArr[index].text;
+                option.value = paymentMethodArr[index].value;
+                _paymentMethodAttr.addOption(option, index);
+                if (_headerPaymentMethodAttr !== null) {
+                    _headerPaymentMethodAttr.addOption(option, index);
+                }
+
+            }
+        }
+        if (marketingCodeError) {
+            alert("The location code selected only allows water billing, but the program selected does not allow water billing. Please select a different program.");
+        }
+    };
+
+    // Success method for retrieving evo_wbill from evo_locationcode
+    AWE.Evolution.WebResources.GetLocationCodeWaterbillSuccess = function (result) {
+
+        if (result !== '' && result !== null && result.length > 0 && result[0].evo_wbill !== null) {
+            _locationCodeWBFlag = result[0].evo_wbill.Value;
+        }
+    };
+
+    // Success method for retrieving evo_wbill from evo_program
+    AWE.Evolution.WebResources.GetProgramWaterbillSuccess = function (result) {
+        if (result !== '' && result !== null && result.length > 0 && result[0].evo_wbill !== null) {
+            _programCodeWBValue = result[0].evo_wbill;
+        }
+    };
+
+
+    // Defect 21686 : Filter marketing code based on Location Code and Customer Type on Enrollment form. 
+    //On Change of Location Code and Contact and on load of Enrollment
+    AWE.Evolution.WebResources.preFilterMarketingCodeLookupOnChange = function () {
+
+        AWE.Evolution.WebResources.preFilterMarketingCodeLookup();
+    };
+
+    AWE.Evolution.WebResources.preFilterMarketingCodeLookup = function () {
+
+        if (Xrm.Page.getAttribute("evo_contactid").getValue() !== null && Xrm.Page.getAttribute("evo_locationcodeid").getValue() !== null) {
+
+            var customerId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+
+            if (customerId == null || customerId == '')
+                return;
+
+            customerId = customerId.replace('{', '').replace('}', '');
+            var contactFilter = "?$select=CustomerTypeCode&$filter=ContactId eq guid'" + customerId + "'";
+            AWE.Evolution.WebResources.Global.retrieveMultiple("ContactSet",
+                    contactFilter,
+                    function (result) {
+                        if (result !== null && result !== '' && result.length > 0 && result[0].CustomerTypeCode !== null && result[0].CustomerTypeCode.Value !== null) {
+                            Xrm.Page.getControl("evo_marketingcodeid").addPreSearch(function () {
+                                AWE.Evolution.WebResources.Global.addMarketingCodeLookupFilter(result[0].CustomerTypeCode.Value, "evo_marketingcodeid");
+                            });
+                        }
+                    },
+                    AWE.Evolution.WebResources.Global.errorCallback,
+                    true);
+        }
+    }
+
+    AWE.Evolution.WebResources.setPaymentMethodNullOnReenrollAndStatusReenroll = function () {
+
+        var reEnroll = AWE.Evolution.WebResources.Global.getLookupName("evo_enrollmentstatreasonid");
+        // Defect 23709 - Test Case - 17288 Step 14 - Enrollment Status reason incorrectly populated
+        if (Xrm.Page.ui.getFormType() === CREATE_MODE) {
+            if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_peenrollmentid") !== null && reEnroll !== null &&
+                (reEnroll === "Re-enrollment" || reEnroll === "Re-enrollment - Saved")) {
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_paymentmethod", null);
+            }
+        }
+
+    };
+
+    AWE.Evolution.WebResources.setSubmitMode = function () {
+        var evo_enrollmentdateAttr = Xrm.Page.getAttribute("evo_enrollmentdate");
+        var evo_eligibledateAttr = Xrm.Page.getAttribute("evo_eligibledate");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+
+        evo_enrollmentdateAttr.setSubmitMode("always");
+        evo_eligibledateAttr.setSubmitMode("always");
+        evo_enddateAttr.setSubmitMode("always");
+
+    }
+
+    // Defect - 22461 Show button "Calculate Refund Button" on the ribbon if the enrollment status is "Cancelled" And Scribe Cancellation not contains Date.
+    // If enrollment status is "Cancelled" And Scribe Cancellation contains Date then hide it.
+    AWE.Evolution.WebResources.visibilityOfCalculateAndRefundRibbonButton = function () {
+
+        if (Xrm.Page.ui.getFormType() === CREATE_MODE || Xrm.Page.ui.getFormType() === UPDATE_MODE) {
+            var enrollmentStatus = AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus");
+            var enrollmentScibeCancellationDate = AWE.Evolution.WebResources.Global.fieldGetValue("evo_axrefunddate");
+            var iscancellationrefundcomplete = AWE.Evolution.WebResources.Global.fieldGetValue("evo_iscancellationrefundcomplete");
+            // Defect - 28598 - Added a condition to Hide the Calculate refund and request refund button for NYC location code
+            var locationCode = Xrm.Page.getAttribute("evo_locationcodeid").getValue()[0].name;
+            if (locationCode == 'New York City, NY') {
+                return false;
+            }
+            //if (enrollmentStatus !== null && enrollmentStatus !== "" && enrollmentStatus === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED && (enrollmentScibeCancellationDate === null || enrollmentScibeCancellationDate === "")) {
+            if (enrollmentStatus && enrollmentStatus === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CANCELLED
+                && (enrollmentScibeCancellationDate === null || enrollmentScibeCancellationDate === "") && !iscancellationrefundcomplete) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Defect = 22779 
+    // If Eligible Date before Feb 29th 2016, calc leapyear otherwise leave it 
+    // If EndDate Date after Feb 29th 2016 or equalTo, calc leapyear otherwise leave it 
+    AWE.Evolution.WebResources.EndDateCalculation = function (eligibleDate, TnCExceptionsCheck) {
+
+        var resultEndDate = new Date();
+        var tempLeapYearDate = new Date();
+        var originalEligibleDate = new Date(eligibleDate);
+        var tempEligibleDate = eligibleDate;
+        var eligibleYear;
+        var endDateYear;
+
+        if (tempEligibleDate == null) {
+            alert("Can't Calculate without a supplied eligible date parameter.");
+            return;
+        }
+
+        if (TnCExceptionsCheck) {
+            resultEndDate = new Date(tempEligibleDate.setDate(tempEligibleDate.getDate() + 364))
+            eligibleYear = originalEligibleDate.getFullYear();
+            endDateYear = resultEndDate.getFullYear();
+
+        }
+        else {
+            resultEndDate = new Date(tempEligibleDate.setDate(tempEligibleDate.getDate() + 334))
+            eligibleYear = originalEligibleDate.getFullYear();
+            endDateYear = resultEndDate.getFullYear();
+
+        }
+
+        //First Check whether Eligible Date is Leap Year and if it is before 29/02 then add 1 Day to End Date i.e. End Date = Eligble Date + 365 OR +335 (according to criteria of TnC flag)
+        //If Eligible Date is not Leap Year then Check whether End Date is Leap Year after adding 364 Daya and if comes after 29/02 then add 1 Day to End Date i.e. End Date = Eligble Date + 365 or +335 (according to criteria of TnC flag)
+        // Otherwise End Date  = Eligible Date + 364
+        tempLeapYearDate = AWE.Evolution.WebResources.Isleapyear(eligibleYear) ? new Date(eligibleYear, _leapYearMonth, _leapYearDate) :
+            ((AWE.Evolution.WebResources.Isleapyear(endDateYear) ? new Date(endDateYear, _leapYearMonth, _leapYearDate) :
+           null));
+
+        if (tempLeapYearDate != null) {
+            if ((tempLeapYearDate.getFullYear() == eligibleYear && originalEligibleDate < tempLeapYearDate) || (tempLeapYearDate.getFullYear() == endDateYear && resultEndDate >= tempLeapYearDate)) {
+                resultEndDate = resultEndDate.setDate(resultEndDate.getDate() + 1);
+            }
+        }
+        return new Date(resultEndDate);
+    };
+
+
+    //CCH Tax  : Method to call action for Calculating CCH Tax on OnChange
+    AWE.Evolution.WebResources.CCHTax = {
+        programCode: null,
+        locationCode: null,
+        //targetEnrollmentId: null,
+        CallAction: function (requestName, contactRef, programCode, locationCode, paymentMethod, subTotal) {
+
+            // Creating the request XML for calling the Action
+            var requestXML = ""
+            requestXML += "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">";
+            requestXML += "  <s:Body>";
+            requestXML += "    <Execute xmlns=\"http://schemas.microsoft.com/xrm/2011/Contracts/Services\" xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\">";
+            requestXML += "      <request xmlns:a=\"http://schemas.microsoft.com/xrm/2011/Contracts\">";
+            requestXML += "        <a:Parameters xmlns:b=\"http://schemas.datacontract.org/2004/07/System.Collections.Generic\">";
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>Target</b:key>";
+            requestXML += "            <b:value i:type=\"a:EntityReference\">";
+            requestXML += "              <a:Id>" + contactRef + "</a:Id>";
+            requestXML += "              <a:LogicalName>" + "contact" + "</a:LogicalName>";
+            requestXML += "              <a:Name i:nil=\"true\" />";
+            requestXML += "            </b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>ProgramCode</b:key>";
+            requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + programCode + "</b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>LocationCode</b:key>";
+            requestXML += "            <b:value i:type=\"c:string\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + locationCode + "</b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>PaymentMethod</b:key>";
+            requestXML += "            <b:value i:type=\"c:int\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">" + paymentMethod + "</b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+            requestXML += "          <a:KeyValuePairOfstringanyType>";
+            requestXML += "            <b:key>SubTotal</b:key>";
+            requestXML += "            <b:value i:type=\"a:Money\" xmlns:c=\"http://www.w3.org/2001/XMLSchema\">";
+            requestXML += "             <a:Value>" + subTotal + "</a:Value>";
+            requestXML += "                </b:value>";
+            requestXML += "          </a:KeyValuePairOfstringanyType>";
+            requestXML += "        </a:Parameters>";
+            requestXML += "        <a:RequestId i:nil=\"true\" />";
+            requestXML += "        <a:RequestName>" + requestName + "</a:RequestName>";
+            requestXML += "      </request>";
+            requestXML += "    </Execute>";
+            requestXML += "  </s:Body>";
+            requestXML += "</s:Envelope>";
+
+            var req = new XMLHttpRequest();
+            req.open("POST", AWE.Evolution.WebResources.Global.getOrganizationSvcWebUrl(), false)
+            req.setRequestHeader("Accept", "application/xml, text/xml, */*");
+            req.setRequestHeader("Content-Type", "text/xml; charset=utf-8");
+            req.setRequestHeader("SOAPAction", "http://schemas.microsoft.com/xrm/2011/Contracts/Services/IOrganizationService/Execute");
+            req.send(requestXML);
+
+            //refresh the page if the request was successful.
+            if (req.status == 200) {
+                if (req.responseText !== "" && req.responseText !== null) {
+                    try {
+
+                        var response = req.responseText;
+                        if (response.indexOf("Tax") > -1) {
+                            var taxValueTag = response.substring(response.indexOf("<b:value"), response.indexOf("</b:value"));
+                            var tax = taxValueTag.substring(taxValueTag.indexOf(">") + 1, taxValueTag.length);
+                            if (!isNaN(Number(tax)))
+                                AWE.Evolution.WebResources.Global.fieldSetValue("evo_tax", parseFloat(tax));
+                        }
+                        else {
+                            AWE.Evolution.WebResources.Global.fieldSetValue("evo_tax", 0);
+                        }
+                    }
+                    catch (e) {
+                        AWE.Evolution.WebResources.Global.fieldSetValue("evo_tax", 0);
+                        alert("Error Occured in calculating tax.");
+                    }
+                }
+            }
+            else {
+                var xmlResponse = req.responseXML.documentElement;
+                var fullNodeList = xmlResponse.getElementsByTagName("faultstring");
+
+                if (typeof (fullNodeList[0].textContent) === "undefined") {
+
+                    //Handles IE9 Browser
+                    var errorMessage = fullNodeList.context.text;
+                    var parseMessage = errorMessage.substring(errorMessage.lastIndexOf("Message:") + 9, errorMessage.lastIndexOf(":"));
+                    var parsedMessages = parseMessage.split("\n\n");
+                    alert(parsedMessages[0]);
+                }
+                else {
+
+                    //Handles IE10 Browser
+                    alert(fullNodeList[0].textContent);
+                }
+            }
+        },
+        Calculate: function () {
+
+            var evo_contactAttr = Xrm.Page.getAttribute("evo_contactid");
+            var evo_programAttr = Xrm.Page.getAttribute("evo_programid");
+            var evo_paymentMethodAttr = Xrm.Page.getAttribute("evo_paymentmethod");
+            var evo_locationCodeAttr = Xrm.Page.getAttribute("evo_locationcodeid");
+            var evo_SubTotalAttr = Xrm.Page.getAttribute("evo_subtotal");
+
+            // Do not calculate tax until all required fields are populated.
+            if (evo_contactAttr == null || evo_contactAttr.getValue() == null
+                || evo_programAttr == null || evo_programAttr.getValue() == null
+                || evo_paymentMethodAttr == null || evo_paymentMethodAttr.getValue() == null
+                || evo_locationCodeAttr == null || evo_locationCodeAttr.getValue() == null
+                || evo_SubTotalAttr == null || evo_SubTotalAttr.getValue() == null)
+                return;
+
+            //Defect 25009 - If Enrollment Status Reason is "Same Day Cancellation", then no tax calculation
+            if (AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid") !== null
+                && AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatreasonid")[0].name === ENROLLMENT_STATUS_REASON_SAMEDAYCANCELLATION)
+                return;
+
+            // Fetching Program Code for Program selected on enrollment
+            var selectedProgramId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_programid");
+            AWE.Evolution.WebResources.Global.retrieveRecord(selectedProgramId, "evo_programSet",
+                function (result) {
+                    if (result !== null && result !== '' && typeof (result) !== 'undefined' && result.evo_programcode !== null && result.evo_programcode !== "") {
+                        AWE.Evolution.WebResources.CCHTax.programCode = result.evo_programcode;
+                    }
+                },
+                AWE.Evolution.WebResources.Global.errorCallback, false);
+
+            // Fetching Program Code for Program selected on enrollment
+            var locationCodeId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_locationcodeid");
+            AWE.Evolution.WebResources.Global.retrieveRecord(locationCodeId, "evo_locationcodeSet",
+
+                function (result) {
+                    if (result !== null && result !== '' && typeof (result) !== 'undefined' && result.evo_Code !== null && result.evo_Code !== "") {
+                        AWE.Evolution.WebResources.CCHTax.locationCode = result.evo_Code;
+                    }
+                },
+                AWE.Evolution.WebResources.Global.errorCallback, false);
+
+            // If Program or Location Code doesnot have code then tax calculation will not execute.
+            if (!AWE.Evolution.WebResources.CCHTax.programCode) {
+                alert("Tax can't be calculated because the selected program does not have a valid program code.")
+                return;
+            }
+
+            if (!AWE.Evolution.WebResources.CCHTax.locationCode) {
+                alert("Tax can't be calculated because the selected location does not have a valid program code.")
+                return;
+            }
+
+            var contactRef = evo_contactAttr.getValue()[0].id;
+            var paymentMethod = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+            var subTotal = evo_SubTotalAttr.getValue();
+
+            // Calling Action
+            AWE.Evolution.WebResources.CCHTax.CallAction("evo_CalculateCCHTax",
+                contactRef,
+                AWE.Evolution.WebResources.CCHTax.programCode,
+                AWE.Evolution.WebResources.CCHTax.locationCode,
+                paymentMethod,
+                subTotal);
+
+        }
+    }
+
+    // Defect 23715:AdHoc - Auto Renew Field on enrollment is not atomatically populating 
+    // Date : 02/16/2016 - Set AutoRenew field value according to PaymentMethod field
+    AWE.Evolution.WebResources.SetAutoRenewWithPaymentMethod = function () {
+
+        var evo_paymentMethodValue = AWE.Evolution.WebResources.Global.getOptionSetValue("evo_paymentmethod");
+
+        if (evo_paymentMethodValue !== null) {
+            switch (evo_paymentMethodValue) {
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.WATERBILL:
+                    AWE.Evolution.WebResources.Global.fieldSetValue("evo_autorenew", AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_WaterBill);
+                    break;
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CREDIT_CARD:
+                    AWE.Evolution.WebResources.Global.fieldSetValue("evo_autorenew", AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_CREDIT_CARD);
+                    break;
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.ACH:
+                    AWE.Evolution.WebResources.Global.fieldSetValue("evo_autorenew", AWE.Evolution.Schema.evo_enrollment.evo_autorenew.To_ACH);
+                    break;
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.CHECK:
+                case AWE.Evolution.Schema.evo_enrollment.evo_paymentmethod.ECHECK:
+                    AWE.Evolution.WebResources.Global.fieldSetValue("evo_autorenew", null);
+                    break;
+            }
+        }
+    }
+
+    //Defect 25663:
+    //This function will set the visibility of Renew button depending upon the status,statusreason and end date
+    AWE.Evolution.WebResources.RenewButtonVisibility = function () {
+
+        var showRenewButton = false;
+
+        var evo_enrollmentstatusAttr = Xrm.Page.getAttribute("evo_enrollmentstatus");
+        var evo_enrollmentstatreasonidAttr = Xrm.Page.getAttribute("evo_enrollmentstatreasonid");
+        var evo_enddateAttr = Xrm.Page.getAttribute("evo_enddate");
+
+        if (evo_enrollmentstatusAttr !== null && (evo_enrollmentstatusAttr.getValue() === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.ACTIVE ||
+            evo_enrollmentstatusAttr.getValue() === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.CLOSED)) {
+
+            if (evo_enrollmentstatusAttr.getValue() === AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.ACTIVE) {
+                showRenewButton = true;
+            }
+            else if (evo_enrollmentstatreasonidAttr !== null && evo_enddateAttr !== null) {
+                var endDate = evo_enddateAttr.getValue();
+
+                if (endDate !== null) {
+                    endDate = new Date(endDate);
+                    endDate.setDate(endDate.getDate() + 30);
+
+                    if (evo_enrollmentstatreasonidAttr.getValue() && endDate > new Date()) {
+                        var targetEnrollmentStatusReasonIdFilter =
+                        "?$select=evo_name&$filter=evo_enrollmentstatusreasonId eq guid'{0}'"
+                        .replace(/\{0\}/g, evo_enrollmentstatreasonidAttr.getValue()[0].id);
+
+                        AWE.Evolution.WebResources.Global.retrieveMultiple(
+                       "evo_enrollmentstatusreasonSet",
+                       targetEnrollmentStatusReasonIdFilter,
+                       function (result) {
+                           if (result && result.length > 0) {
+
+                               if (result[0].evo_name.toLowerCase() === ENROLLMENT_STATUS_REASON_EXPIREDENROLLMENT.toLowerCase())
+                                   showRenewButton = true;
+                           }
+                       }, false, false);
+                    }
+                }
+            }
+        }
+
+        return showRenewButton;
+    };
+
+    AWE.Evolution.WebResources.ProceedAnywayfieldVisibility = function () {
+
+        var CustomerId = Xrm.Page.getAttribute("evo_contactid").getValue()[0].id;
+        if (CustomerId !== null && CustomerId !== '') {
+            var Customerfilter = "?$select=evo_DelinquencyCancellationinLast12Months&$filter=ContactId eq guid'" + CustomerId + "'";
+            AWE.Evolution.WebResources.Global.retrieveMultiple("ContactSet", Customerfilter,
+                                AWE.Evolution.WebResources.getDelinquencyCancellationSuccess, AWE.Evolution.WebResources.Global.errorCallback, false);
+        }
+    }
+
+    AWE.Evolution.WebResources.getDelinquencyCancellationSuccess = function (result) {
+
+        if (result != null && result != "") {
+            DelinquencyCancellationCheck = result[0].evo_DelinquencyCancellationinLast12Months;
+            if (DelinquencyCancellationCheck != null && DelinquencyCancellationCheck != "" && DelinquencyCancellationCheck == 1) {
+                AWE.Evolution.WebResources.Global.fieldSetVisible("evo_ProceedAnyway", true);
+                AWE.Evolution.WebResources.Global.fieldSetValue("evo_ProceedAnyway", 0);
+            }
+        }
+    }
+    AWE.Evolution.WebResources.PopulateLocationCodeForProblemEnrollment = function () {
+
+        if (AWE.Evolution.WebResources.Global.getFormType() === UPDATE_MODE && AWE.Evolution.WebResources.Global.fieldGetValue("evo_enrollmentstatus") == AWE.Evolution.WebResources.evo_enrollment.evo_enrollmentstatus.PROBLEMENROLLMENT) {
+
+            if (AWE.Evolution.WebResources.Global.getLookupName("evo_enrollmentstatreasonid") == ENROLLMENT_STATUS_REASON_DUPLICATECUST ||
+               AWE.Evolution.WebResources.Global.getLookupName("evo_enrollmentstatreasonid") == ENROLLMENT_STATUS_REASON_CUSTNOTFOUND) {
+                var customerId = AWE.Evolution.WebResources.Global.getLookupGuidValue("evo_contactid");
+                var evo_insuracecustomerAttr = Xrm.Page.getAttribute("evo_insuracecustomer");
+                var evo_locationcodeidAttr = Xrm.Page.getAttribute("evo_locationcodeid");
+                AWE.Evolution.WebResources.Global.retrieveRecord(
+                           customerId,
+                           "ContactSet",
+                           function (result) {
+                               if (result !== '' && result !== null) {
+
+                                   // Check waterbill flag.
+                                   if (!result.evo_WaterBillOnOff) {
+                                       alert(AWE.Evolution.WebResources.evo_enrollment.Messages.customerWaterBillShutoffMsg);
+
+                                       var attributes = Xrm.Page.data.entity.attributes.get();
+                                       for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+
+                                       Xrm.Page.ui.close();
+                                   }
+                                   else if (result.evo_Delinquency) {
+                                       var proceedEnrollment = confirm(AWE.Evolution.WebResources.evo_enrollment.Messages.customerDelinquentConfirmMsg)
+                                       if (!proceedEnrollment) {
+                                           var attributes = Xrm.Page.data.entity.attributes.get();
+                                           for (var i in attributes) { attributes[i].setSubmitMode("never"); }
+                                           Xrm.Page.getControl("evo_delinquent").clearNotification();
+                                           Xrm.Page.ui.close();
+                                       }
+                                   }
+
+                                   // Initialize/Map Contact field locally
+                                   evo_insuracecustomerAttr.setValue(result.evo_insurancecustomer);
+                                   evo_locationcodeidAttr.setValue(null);
+
+                                   if (result.evo_locationcodeid != null) {
+                                       var locationValue = new Array();
+                                       locationValue[0] = new Object();
+                                       locationValue[0].id = result.evo_locationcodeid.Id;
+                                       locationValue[0].name = result.evo_locationcodeid.Name;
+                                       locationValue[0].entityType = result.evo_locationcodeid.LogicalName;
+                                       evo_locationcodeidAttr.setValue(locationValue);
+                                   }
+                               }
+                           },
+                           AWE.Evolution.WebResources.Global.errorCallback,
+                           false);
+                Xrm.Page.getAttribute("evo_locationcodeid").fireOnChange();
+                Xrm.Page.getControl("evo_paymentmethod").setDisabled(false);
+            }
+
+        }
+
+    }
+
+
