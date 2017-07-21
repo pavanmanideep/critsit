@@ -1,0 +1,185 @@
+USE [EVOLUTION_STAGING]
+GO
+
+/****** Object:  StoredProcedure [StagingCRM].[Sp_aweRe_EnrollmentsCreation]    Script Date: 7/21/2017 12:52:18 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [StagingCRM].[Sp_aweRe_EnrollmentsCreation] 
+AS 
+  BEGIN 
+
+      
+	   SET NOCOUNT ON;
+      
+	  DECLARE @startDt DATE
+			 ,@endDt DATE
+	  SET @startDt =  dateadd(d,-30,Cast(Getdate() as DATE))--Dateadd(d, -7, Dateadd(d, 60,Cast(Getdate() AS DATE))) 
+	  SET @endDt =  Dateadd(d, 60, Cast(Getdate() AS DATE)) 
+
+	  	  DECLARE @EnrollmentStatusReasonid varchar(38)
+
+	  SELECT @EnrollmentStatusReasonid = REPLACE(REPLACE([evo_enrollmentstatusreasonid],'{',''),'}','') from CRM.EVOEnrollmentStatusReason where evo_name = 'Renewal' and evo_enrollmentstatus = 2
+
+	 
+	 ;WITH CTE_parentandalreadyrenewedenrollment(evo_enrollmentid)
+	 AS 
+	 ( 
+		  --Exclude parent where child enrollment is yet to expire 
+		  SELECT e.evo_peenrollmentid 
+		  FROM   [Evolution_MSCRM].dbo.evo_enrollment (nolock)e 
+			INNER JOIN  [Evolution_MSCRM].dbo.evo_enrollment (nolock) c ON e.evo_peenrollmentid = c.evo_enrollmentId
+		  WHERE  e.evo_EndDate > @endDt 
+		  GROUP  BY e.evo_peenrollmentid 
+		  UNION 
+		  -- Exclude enrollment that are renewed  and  yet to expire 
+		  SELECT e.evo_enrollmentid 
+		  FROM   [Evolution_MSCRM].dbo.evo_enrollment (nolock)e 
+		  WHERE  evo_enrollmentstatreasonidname = 'Renewal'
+		  AND Cast(evo_enddate AS DATE) >@endDt
+	  ),
+	  
+	  CTE_renewals(evo_enrollmentid, evo_marketingcodeid)
+	  AS
+	  (
+		  SELECT en.evo_enrollmentid, 
+				 en.evo_marketingcodeid
+		    FROM [Evolution_MSCRM].dbo.evo_enrollment (nolock)en 
+				 LEFT JOIN [Evolution_MSCRM].dbo.evo_evo_enrollment_list (nolock) li 
+		      ON en.evo_enrollmentId = li.evo_enrollmentid
+				 LEFT JOIN [Evolution_MSCRM].dbo.List (nolock) l on l.listid = li.ListId 
+				 AND l.evo_IncreaseType = 1 
+		   WHERE Cast(evo_enddate AS DATE) BETWEEN @startDt AND @endDt                                           
+				 AND evo_enrollmentstatus = 2 -- Active QC
+			 AND evo_autorenew <> 3 -- Do Not Auto Renew 
+				 AND evo_paymentmethod IN ( 1, 2, 4 ) -- 1= Waterbill; 2 = Credit Card; 4 = ACH 
+				 AND en.evo_WaterBillOnOff = 1 --Defect 29776
+		GROUP BY en.evo_enrollmentid, 
+				 en.evo_marketingcodeid 
+	),
+
+	CTE_enrollmentpaymentauthorization(evo_enrollmentid,evo_paymentauthorization)
+	AS 
+	(
+      SELECT Pauth.evo_enrollmentid, 
+             p.evo_paymentauthorizationid 
+      FROM   [Evolution_MSCRM].dbo.evo_paymentauthorization (nolock)p 
+             INNER JOIN (SELECT Pa.evo_enrollmentid, 
+                                Max(pa.createdon) AS Createdon 
+                         FROM   [Evolution_MSCRM].dbo.evo_paymentauthorization (nolock)PA 
+                         WHERE  evo_enrollmentid IS NOT NULL 
+                         GROUP  BY pa.evo_enrollmentid) AS Pauth 
+                     ON P.evo_enrollmentid = Pauth.evo_enrollmentid 
+                        AND P.createdon = Pauth.createdon 
+	)
+, Renewenrollment as
+(     
+	  SELECT  
+      e.evo_enrollmentnumber 
+      ,CASE 
+        WHEN evo_rpioptout = '0' AND 
+			Cast(MC.evo_replacementcode AS NVARCHAR(50)) IS NOT NULL 
+	        AND li.evo_enrollmentid is not null 
+			AND l.evo_RPIcode is not null AND e.evo_RPICode is not null
+			AND l.evo_RPICode = e.evo_RPICode		
+		 THEN 
+        RC.evo_monthlyprice 
+        ELSE e.evo_monthlyprice 
+      END                             AS MarketingCodeMonthlyPrice
+	 ,CASE 
+        WHEN evo_rpioptout = '0' AND 
+			Cast(MC.evo_replacementcode AS NVARCHAR(50)) IS NOT NULL
+		    AND li.evo_enrollmentid is not null 
+			AND l.evo_RPIcode is not null AND e.evo_RPICode is not null
+			AND l.evo_RPICode = e.evo_RPICode
+		 THEN 
+        ISNULL(RC.evo_AnnualPrice, 0.00) 
+        ELSE ISNULL(e.evo_AnnualPrice, 0.00)
+      END                             AS MarketingCodeAnnualPrice
+	  ,CASE 
+        WHEN evo_rpioptout = '0' AND 
+			Cast(MC.evo_replacementcode AS NVARCHAR(50)) IS NOT NULL
+		    AND li.evo_enrollmentid is not null 
+			AND l.evo_RPIcode is not null AND e.evo_RPICode is not null
+			AND l.evo_RPICode = e.evo_RPICode
+		 THEN 
+        ISNULL(RC.evo_quarterlyprice, 0.00)
+        ELSE ISNULL(e.evo_quarterlyprice, 0.00)
+      END                             AS MarketingCodeQuarterlyPrice
+      ,CASE 
+        WHEN evo_rpioptout = '0' AND 
+			Cast(MC.evo_replacementcode AS NVARCHAR(50)) IS NOT NULL 
+		    AND li.evo_enrollmentid is not null 
+			AND l.evo_RPIcode is not null AND e.evo_RPICode is not null
+			AND l.evo_RPICode = e.evo_RPICode			
+		 THEN  
+        ISNULL(RC.evo_bimonthlyprice, 0.00) 
+        ELSE ISNULL(e.evo_bimonthlyprice, 0.00)
+      END                             AS MarketingCodeBiMonthlyPrice
+	  ,CASE 
+        WHEN evo_rpioptout = '0' AND 
+			Cast(MC.evo_replacementcode AS NVARCHAR(50)) IS NOT NULL 
+		    AND li.evo_enrollmentid is not null
+            AND l.evo_RPIcode is not null AND e.evo_RPICode is not null			
+			AND l.evo_RPICode = e.evo_RPICode			
+		 THEN  
+        MC.evo_replacementcode 
+        ELSE MC.evo_marketingcodeid 
+      END                             AS MarketingCode
+	  ,e.evo_enrollmentid
+      ,e.evo_rpioptout
+      ,Dateadd(d, 1, e.evo_enddate)    AS EnrollmentDate
+      ,e.evo_programid
+      ,e.evo_refundamount 
+      ,e.evo_ordersource 
+      ,e.evo_locationcodeid
+      ,e.evo_contactid
+      ,CASE 
+        WHEN e.evo_paymentmethod IN ( 1, 2, 4 ) -- 1= Waterbill; 2 = Credit Card; 4 = ACH 
+      THEN e.evo_paymentmethod 
+        ELSE NULL 
+      END                             AS evo_autorenew
+      ,e.evo_userid
+      ,e.evo_billingfrequency
+      ,e.evo_paymentmethod
+      ,e.evo_paymentplanid 
+      ,pauth.evo_paymentauthorization
+      ,e.evo_paymentfrequency
+      ,Dateadd(year, 1, e.evo_enddate) AS endate
+      ,2                               AS 'evo_enrollmentStatus' -- Active 
+	  ,@EnrollmentStatusReasonid		  AS 'evo_enrollmentstatusreasonid'
+	  ,e.evo_PlanID	
+	  ,e.evo_OriginalOrderNumber 
+	  FROM CTE_renewals r 
+		  INNER JOIN [Evolution_MSCRM].dbo.evo_enrollment (nolock)e  ON r.evo_enrollmentid = e.evo_enrollmentid 
+		  INNER JOIN [Evolution_MSCRM].dbo.evo_marketingcode (nolock) MC ON r.evo_marketingcodeid = mc.evo_marketingcodeid 
+		  LEFT JOIN [Evolution_MSCRM].dbo.evo_marketingcode (nolock) RC ON mc.evo_replacementcode = RC.evo_marketingcodeid
+		  LEFT JOIN [Evolution_MSCRM].dbo.evo_evo_enrollment_list (nolock) li ON e.evo_enrollmentId = li.evo_enrollmentid			   
+	      LEFT JOIN [Evolution_MSCRM].dbo.List (nolock) l on l.listid = li.ListId  AND l.evo_IncreaseType = 1 		  
+		  LEFT JOIN CTE_parentandalreadyrenewedenrollment p ON r.evo_enrollmentid = p.evo_enrollmentid 
+		  LEFT JOIN CTE_enrollmentpaymentauthorization AS pauth ON r.evo_enrollmentid = pauth.evo_enrollmentid 
+      WHERE  p.evo_enrollmentid IS NULL AND e.evo_WaterBillOnOff = 1 --Defect 29776
+	  )
+
+	Select Renewenrollment.*
+		, CASE Renewenrollment.evo_PaymentFrequency 
+			 WHEN 1 THEN MarketingCodeMonthlyPrice 
+			 WHEN 2 THEN MarketingCodeAnnualPrice
+			 WHEN 3 THEN MarketingCodeBiMonthlyPrice
+			 WHEN 4 THEN MarketingCodeQuarterlyPrice
+		END  AS EnrollmentPrice
+
+		, CASE Renewenrollment.evo_PaymentFrequency 
+			 WHEN 1 THEN ISNULL(MarketingCodeMonthlyPrice,0) + ISNULL(Renewenrollment.evo_refundamount,0)
+			 WHEN 2 THEN ISNULL(MarketingCodeAnnualPrice,0) + ISNULL(Renewenrollment.evo_refundamount,0)
+			 WHEN 3 THEN ISNULL(MarketingCodeBiMonthlyPrice,0) + ISNULL(Renewenrollment.evo_refundamount,0)
+			 WHEN 4 THEN ISNULL(MarketingCodeQuarterlyPrice,0) + ISNULL(Renewenrollment.evo_refundamount,0)
+		END  AS SubTotal
+	FROM Renewenrollment
+END
+GO
+
+
